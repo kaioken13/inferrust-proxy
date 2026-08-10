@@ -1,0 +1,21 @@
+[package]
+name = "inferrust-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async Runtime & Web Framework
+tokio = { version = "1.38", features = ["full"] }
+axum = "0.7"
+hyper = { version = "1.0", features = ["full"] }
+
+# HTTP Client (para repasse de requisições)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Tracing / Observabilidade Básica
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
