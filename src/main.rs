@@ -1,6 +1,3 @@
-fn main() {
-    println!("Hello, world!");
-}
 use axum::{
     routing::{get, post},
     Json, Router,
@@ -37,8 +34,7 @@ async fn health_check() -> Json<Value> {
 
 async fn chat_completions_handler(Json(payload): Json<Value>) -> Json<Value> {
     tracing::info!("Requisição recebida em /v1/chat/completions");
-    
-    // Placeholder: Na Fase 1 faremos o repasse (forwarding) para vLLM/Ollama
+
     Json(json!({
         "id": "chatcmpl-proxy-mock",
         "object": "chat.completion",
