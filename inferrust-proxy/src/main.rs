@@ -1,3 +1,6 @@
+fn main() {
+    println!("Hello, world!");
+}
 use axum::{
     routing::{get, post},
     Json, Router,
