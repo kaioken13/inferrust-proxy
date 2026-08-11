@@ -95,3 +95,49 @@ async fn chat_completions_handler(
 
         Ok(Json(response_json))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    //Helper para criar o app para os testes
+    fn create_test_app() -> Router {
+        let state = Arc::new(AppState {
+            http_client: Client::new(),
+            backend_url: "http://localhost:11434".to_string(),
+        });
+
+        Router::new()
+        .route("/health", get(health_check))
+        .route("/v1/chat/completions", post(chat_completions_handler))
+        .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_health_check_returns_ok() {
+        let app = create_test_app();
+
+        // Cria uma requisição GET simulada para /health
+        let response = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        // Asserção 1: O status code deve ser 200 OK
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Lê o corpo da resposta
+        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await.unwrap();
+        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+
+        // Asserção 2: O JSON retornado deve ter os campos esperados
+        assert_eq!(body_json["status"], "ok");
+        assert_eq!(body_json["service"], "inferrust-proxy");
+    }
+}
