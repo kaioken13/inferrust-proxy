@@ -1,24 +1,11 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    routing::{get, post},
-    Json, Router,
-};
+use inferrust_proxy::{create_app, AppState};
 use reqwest::Client;
-use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[derive(Clone)]
-struct AppState {
-    http_client: Client,
-    backend_url: String,
-}
-
 #[tokio::main]
-async fn main() {
-    // Inicializa o sistema de logs/tracing
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "inferrust_proxy=debug,info".into()),
@@ -26,118 +13,19 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Cria a estrutura de estado compartilhado
     let state = Arc::new(AppState {
         http_client: Client::new(),
-        backend_url: std::env::var("BACKEND_URL").unwrap_or_else(|_| "http://localhost:11434".to_string()),
+        backend_url: std::env::var("BACKEND_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string()),
     });
 
-    // Roteamento da aplicação
-    let app = Router::new()
-        .route("/health", get(health_check))
-        .route("/v1/chat/completions", post(chat_completions_handler))
-        .with_state(state);
+    let app = create_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     tracing::info!("Proxy rodando em http://{}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
 
-async fn health_check() -> Json<Value> {
-    Json(json!({ "status": "ok", "service": "inferrust-proxy" }))
-}
-
-async fn chat_completions_handler(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<Value>
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    tracing::info!("Requisição recebida em /v1/chat/completions");
-
-    let target_url = format!("{}/v1/chat/completions", state.backend_url);
-
-    // Envia o payload recebido diretamente para o Ollama
-    let response = state
-        .http_client
-        .post(&target_url)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|err| {
-            tracing::error!("Erro ao se comunicar com o backend de inferência: {:?}", err);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "error": {
-                        "message": "Falha na comunicação com o backend de inferência.",
-                        "type": "bad_gateway",
-                        "details": err.to_string()
-                    }
-                })),
-            )
-        })?;
-
-        // Lê a resposta JSON do Ollama
-
-        let response_json = response.json::<Value>().await.map_err(|err| {
-            tracing::error!("Erro ao deserializar a responder do backend: {:?}", err);
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "error": {
-                        "message": "Resposta inválida recebida dp backend de inferência.",
-                        "type": "internal_error"
-                    }
-                }))
-            )
-        })?;
-
-        Ok(Json(response_json))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
-
-    //Helper para criar o app para os testes
-    fn create_test_app() -> Router {
-        let state = Arc::new(AppState {
-            http_client: Client::new(),
-            backend_url: "http://localhost:11434".to_string(),
-        });
-
-        Router::new()
-        .route("/health", get(health_check))
-        .route("/v1/chat/completions", post(chat_completions_handler))
-        .with_state(state)
-    }
-
-    #[tokio::test]
-    async fn test_health_check_returns_ok() {
-        let app = create_test_app();
-
-        // Cria uma requisição GET simulada para /health
-        let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        // Asserção 1: O status code deve ser 200 OK
-        assert_eq!(response.status(), StatusCode::OK);
-
-        // Lê o corpo da resposta
-        let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await.unwrap();
-        let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
-
-        // Asserção 2: O JSON retornado deve ter os campos esperados
-        assert_eq!(body_json["status"], "ok");
-        assert_eq!(body_json["service"], "inferrust-proxy");
-    }
+    Ok(())
 }
