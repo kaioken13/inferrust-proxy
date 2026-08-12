@@ -2,19 +2,21 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use http_body_util::BodyExt; // Para o .collect().await no Axum 0.7
+use http_body_util::BodyExt;
 use inferrust_proxy::{create_app, AppState};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tower::ServiceExt;
+use moka::future::Cache;
 
-// 1. TESTE: Health Check
+// 1. TEST: Health Check
 #[tokio::test]
 async fn test_health_check_returns_ok() {
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_url: "http://localhost:11434".to_string(),
+        cache: Cache::new(100),
     });
     let app = create_app(state);
 
@@ -37,7 +39,7 @@ async fn test_health_check_returns_ok() {
     assert_eq!(body_json["service"], "inferrust-proxy");
 }
 
-// 2. TESTE: Proxy Encaminha Payload Corretamente
+// 2. TEST: Proxy Forwards Payload Correctly
 #[tokio::test]
 async fn test_proxy_forwards_payload_to_backend() {
     let mock_server = wiremock::MockServer::start().await;
@@ -61,6 +63,7 @@ async fn test_proxy_forwards_payload_to_backend() {
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_url: backend_url.to_string(),
+        cache: Cache::new(100),
     });
     let app = create_app(state);
 
@@ -88,12 +91,13 @@ async fn test_proxy_forwards_payload_to_backend() {
     assert_eq!(json["choices"][0]["message"]["content"], "Hello from mock!");
 }
 
-// 3. TESTE: Backend Offline Retorna 502 Bad Gateway
+// 3. TEST: Backend Offline Retorna 502 Bad Gateway
 #[tokio::test]
 async fn test_backend_unreachable_returns_502() {
     let state = Arc::new(AppState {
         http_client: Client::new(),
-        backend_url: "http://127.0.0.1:59999".to_string(),
+        backend_url: "http://127.0.0.1:99999".to_string(),
+        cache: Cache::new(100),
     });
     let app = create_app(state);
 
@@ -118,15 +122,16 @@ async fn test_backend_unreachable_returns_502() {
     assert!(json["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("Falha na comunicação"));
+        .contains("Communication failure"));
 }
 
-// 4. TESTE: Payload Inválido (JSON Malformado)
+// 4. TEST: Invalid Payload (Malformed JSON)
 #[tokio::test]
 async fn test_invalid_json_returns_bad_request() {
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_url: "http://localhost:11434".to_string(),
+        cache: Cache::new(100),
     });
     let app = create_app(state);
 

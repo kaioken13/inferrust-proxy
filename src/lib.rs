@@ -7,15 +7,17 @@ use axum::{
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use moka::future::Cache;
 
-// Estado compartilhado público para que o main.rs e os testes possam acessar
+// Shared public state so that main.rs and tests can access it
 #[derive(Clone)]
 pub struct AppState {
     pub http_client: Client,
     pub backend_url: String,
+    pub cache: Cache<String, Value>,
 }
 
-// Construtor público do Router (usado pelo main e pelos testes)
+// Public constructor for the Router (used by main and tests)
 pub fn create_app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health_check))
@@ -35,6 +37,21 @@ pub async fn chat_completions_handler(
 
     let target_url = format!("{}/v1/chat/completions", state.backend_url);
 
+    // 1. Generate a cache key
+    let cache_key = match serde_json::to_string(&payload["messages"]) {
+        Ok(key) => key,
+        Err(_) => "invalid_key".to_string(),
+    };
+
+    // 2. Verify cache (Cache HIT)
+    if let Some(cached_response) = state.cache.get(&cache_key).await {
+        tracing::info!("🟢 CACHE HIT! Returning response from RAM instantly.");
+        return Ok(Json(cached_response));
+    }
+
+    tracing::info!("🔴 CACHE MISS. Forwarding request to the inference backend...");
+
+    // Send to Ollama
     let response = state
         .http_client
         .post(&target_url)
@@ -42,12 +59,12 @@ pub async fn chat_completions_handler(
         .send()
         .await
         .map_err(|err| {
-            tracing::error!("Erro ao se comunicar com o backend de inferência: {:?}", err);
+            tracing::error!("Error communicating with the inference backend: {:?}", err);
             (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({
                     "error": {
-                        "message": "Falha na comunicação com o backend de inferência.",
+                        "message": "Communication failure with the inference backend..",
                         "type": "bad_gateway",
                         "details": err.to_string()
                     }
@@ -56,17 +73,20 @@ pub async fn chat_completions_handler(
         })?;
 
     let response_json = response.json::<Value>().await.map_err(|err| {
-        tracing::error!("Erro ao deserializar a resposta do backend: {:?}", err);
+        tracing::error!("Error deserialize backend response: {:?}", err);
         (
             StatusCode::BAD_GATEWAY,
             Json(json!({
                 "error": {
-                    "message": "Resposta inválida recebida do backend de inferência.",
+                    "message": "Invalid response received from the inference backend.",
                     "type": "internal_error"
                 }
             })),
         )
     })?;
+
+    // 3. save to cache (Cache INSERT)
+    state.cache.insert(cache_key, response_json.clone()).await;
 
     Ok(Json(response_json))
 }

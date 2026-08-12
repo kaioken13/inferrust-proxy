@@ -1,7 +1,9 @@
 use inferrust_proxy::{create_app, AppState};
+use moka::future::Cache;
 use reqwest::Client;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -13,10 +15,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    // 1. Configuring the Cache policies
+    let cache = Cache::builder()
+    .max_capacity(10_000) // Maximum number of entries in the cache
+    .time_to_live(Duration::from_secs(60 * 60)) // Entries will live for 60 minutes
+    .time_to_idle(Duration::from_secs(10 * 60)) // Entries will be removed if not accessed for 10 minutes
+    .build();
+
+    // 2. Creating the shared application state
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_url: std::env::var("BACKEND_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+        cache,
     });
 
     let app = create_app(state);
