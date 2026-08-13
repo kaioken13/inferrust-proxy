@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = create_app(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    tracing::info!("Proxy rodando em http://{}", addr);
+    tracing::info!("Proxy running at http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

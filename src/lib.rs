@@ -33,7 +33,7 @@ pub async fn chat_completions_handler(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    tracing::info!("Requisição recebida em /v1/chat/completions");
+    tracing::info!("Request received at /v1/chat/completions");
 
     let target_url = format!("{}/v1/chat/completions", state.backend_url);
 
