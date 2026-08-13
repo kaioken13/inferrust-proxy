@@ -1,13 +1,17 @@
 use axum::{
     extract::State,
     http::StatusCode,
-    routing::{get, post},
-    Json, Router,
+    Json,
+    BoxError,
 };
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use moka::future::Cache;
+use axum::error_handling::HandleErrorLayer;
+use std::time::Duration;
+use tower::{ServiceBuilder};
+use tower::limit::RateLimitLayer;
 
 // Shared public state so that main.rs and tests can access it
 #[derive(Clone)]
@@ -18,10 +22,20 @@ pub struct AppState {
 }
 
 // Public constructor for the Router (used by main and tests)
-pub fn create_app(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/health", get(health_check))
-        .route("/v1/chat/completions", post(chat_completions_handler))
+pub fn create_app(state: Arc<AppState>) -> axum::Router {
+    axum::Router::new()
+        .route("/v1/chat/completions", axum::routing::post(chat_completions_handler))
+        .layer(
+            ServiceBuilder::new()
+                .layer(HandleErrorLayer::new(|err: BoxError| async move {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        format!("Rate limit exceeded: {}", err),
+                    )
+                }))
+                .layer(tower::buffer::BufferLayer::new(100))
+                .layer(RateLimitLayer::new(2, Duration::from_secs(1))),
+        )
         .with_state(state)
 }
 

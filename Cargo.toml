@@ -22,6 +22,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Caching (Movido para cá!)
 moka = { version = "0.12", features = ["future"] }
+tower = { version = "0.4", features = ["util", "limit","buffer"] }
 
 [dev-dependencies]
 wiremock = "0.6"
