@@ -3,24 +3,38 @@ mod common;
 
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
+use wiremock::{matchers, Mock, MockServer, ResponseTemplate}; // 👈 Added wiremock
 
 #[tokio::test]
 async fn test_rate_limiter_shapes_traffic() {
-    let app = common::setup_test_app("http://localhost:11434".to_string());
+    // 1. Spin up a fake backend that ALWAYS returns 200 OK
+    let mock_server = MockServer::start().await;
+    Mock::given(matchers::any())
+        .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+        .mount(&mock_server)
+        .await;
+
+    // 2. Point the proxy to the fake Wiremock backend
+    let app = common::setup_test_app(mock_server.uri());
 
     let start = std::time::Instant::now();
+
+    // 3. Send a properly formatted payload
+    let payload = serde_json::json!({
+        "model": "test",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
 
     let make_req = || {
         Request::builder()
             .uri("/v1/chat/completions")
             .method("POST")
             .header("Content-Type", "application/json")
-            .body(axum::body::Body::from(r#"{"model": "test"}"#))
+            .body(axum::body::Body::from(payload.to_string()))
             .unwrap()
     };
 
-    // Fire 3 requests concurrently.
-    // Limit is 2 per second. The 3rd request will be held in the buffer!
+    // 4. Fire 3 requests concurrently
     let (res1, res2, res3) = tokio::join!(
         app.clone().oneshot(make_req()),
         app.clone().oneshot(make_req()),
@@ -29,15 +43,15 @@ async fn test_rate_limiter_shapes_traffic() {
 
     let elapsed = start.elapsed();
 
-    // All of them should eventually succeed with a 200 OK
+    // Now they will definitively return 200 OK!
     assert_eq!(res1.unwrap().status(), StatusCode::OK);
     assert_eq!(res2.unwrap().status(), StatusCode::OK);
     assert_eq!(res3.unwrap().status(), StatusCode::OK);
 
-    // The undeniable proof: The total execution MUST take at least 1 second
+    // Assert the traffic was delayed by at least 1 second
     assert!(
         elapsed.as_secs_f64() >= 1.0,
-        "The rate limiter failed! It processed 3 requests in less than 1 second. Elapsed: {:?}",
+        "The rate limiter failed! Elapsed: {:?}",
         elapsed
     );
 }

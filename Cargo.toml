@@ -25,6 +25,7 @@ moka = { version = "0.12", features = ["future"] }
 tower = { version = "0.4", features = ["util", "limit","buffer"] }
 sha2 = "0.10"
 hex = "0.4"
+tokenizers = "0.23.1"
 
 [dev-dependencies]
 wiremock = "0.6"

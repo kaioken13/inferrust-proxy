@@ -6,11 +6,14 @@ use std::sync::Arc;
 
 /// Creates a test instance of the Axum router with a configurable backend URL.
 pub fn setup_test_app(backend_url: String) -> axum::Router {
+    let tokenizer = tokenizers::Tokenizer::from_file("tokenizer.json")
+        .expect("Failed to load tokenizer.json");
+
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_url,
         cache: Cache::new(100),
-        // If you already added the Tokenizer in Phase 4, you will need to initialize it here too!
+        tokenizer,
     });
     
     create_app(state)
