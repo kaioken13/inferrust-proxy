@@ -1,3 +1,4 @@
+// src/main.rs
 use inferrust_proxy::{create_app, AppState};
 use moka::future::Cache;
 use reqwest::Client;
@@ -15,19 +16,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // 1. Configuring the Cache policies
     let cache = Cache::builder()
-    .max_capacity(10_000) // Maximum number of entries in the cache
-    .time_to_live(Duration::from_secs(60 * 60)) // Entries will live for 60 minutes
-    .time_to_idle(Duration::from_secs(10 * 60)) // Entries will be removed if not accessed for 10 minutes
-    .build();
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_secs(60 * 60))
+        .time_to_idle(Duration::from_secs(10 * 60))
+        .build();
 
     let tokenizer = tokenizers::Tokenizer::from_file("tokenizer.json")
         .expect("Failed to load tokenizer.json");
 
-    // 2. Creating the shared application state
+    // Otimização de Pool de conexões TCP/HTTP do Reqwest para evitar handshakes TLS repetidos
+    let http_client = Client::builder()
+        .pool_max_idle_per_host(50)                    // Mantém conexões quentes com o backend de inferência
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .timeout(Duration::from_secs(300))             // Tempo máximo para LLMs lentas responderem
+        .build()
+        .expect("Failed to build HTTP Client");
+
     let state = Arc::new(AppState {
-        http_client: Client::new(),
+        http_client,
         backend_url: std::env::var("BACKEND_URL")
             .unwrap_or_else(|_| "http://localhost:11434".to_string()),
         cache,
@@ -36,7 +44,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = create_app(state);
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    // Permite rodar em 0.0.0.0 em produção (necessário para Docker) e ler porta da Env
+    let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .parse()
+        .expect("Invalid address configuration");
+
     tracing::info!("Proxy running at http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;

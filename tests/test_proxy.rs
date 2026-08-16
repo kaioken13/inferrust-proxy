@@ -14,23 +14,23 @@ use tower::ServiceExt;
 async fn test_health_check_returns_ok() {
     let app = common::setup_test_app("http://localhost:11434".to_string());
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
+    let request = Request::builder()
+        .uri("/health")
+        .method("GET")
+        .body(axum::body::Body::empty())
         .unwrap();
+
+    let response = app.oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
 
-    let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let body_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+    // Read the body and parse it as JSON
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
-    assert_eq!(body_json["status"], "ok");
-    assert_eq!(body_json["service"], "inferrust-proxy");
+    // The new assertions that match your refactored handler!
+    assert_eq!(json["status"], "ok");
+    assert_eq!(json["message"], "inferrust-proxy");
 }
 
 // 2. TEST: Proxy Forwards Payload Correctly
