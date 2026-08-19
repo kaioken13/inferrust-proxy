@@ -3,7 +3,6 @@ use inferrust_proxy::{create_app, AppState};
 use moka::future::Cache;
 use reqwest::Client;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -25,26 +24,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenizer = tokenizers::Tokenizer::from_file("tokenizer.json")
         .expect("Failed to load tokenizer.json");
 
-    // Otimização de Pool de conexões TCP/HTTP do Reqwest para evitar handshakes TLS repetidos
+    // Reqwest TCP/HTTP Connection Pool Optimization to avoid repeated TLS handshakes
     let http_client = Client::builder()
-        .pool_max_idle_per_host(50)                    // Mantém conexões quentes com o backend de inferência
+        .pool_max_idle_per_host(50)                    // Maintains warm connections to the inference backend
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(60))
-        .timeout(Duration::from_secs(300))             // Tempo máximo para LLMs lentas responderem
+        // TODO: Mitigate Latency Kills
+        .timeout(Duration::from_secs(300))             // Maximum time for slow LLMs to respond
         .build()
         .expect("Failed to build HTTP Client");
 
-    let state = Arc::new(AppState {
+    let backend_urls_env = std::env::var("BACKEND_URLS")
+    .unwrap_or_else(|_| "http://localhost:11434".to_string());
+
+    let backend_urls: Vec<String> = backend_urls_env
+        .split(',')
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .collect();
+
+    let redis_client = redis::Client::open("redis://127.0.0.1/")
+        .expect("Failed to initialize Redis client");
+
+    let state = std::sync::Arc::new(crate::AppState {
         http_client,
-        backend_url: std::env::var("BACKEND_URL")
-            .unwrap_or_else(|_| "http://localhost:11434".to_string()),
+        backend_urls,
+        next_replica: std::sync::atomic::AtomicUsize::new(0),
         cache,
         tokenizer,
+        latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
+        redis_client,
     });
 
     let app = create_app(state);
 
-    // Permite rodar em 0.0.0.0 em produção (necessário para Docker) e ler porta da Env
+    // Allows running on 0.0.0.0 in production (required for Docker) and reading the Env port
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr: SocketAddr = format!("{}:{}", host, port)

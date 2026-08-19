@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 pub fn generate_cache_key(payload: &Value) -> String {
     let mut hasher = Sha256::new();
 
-    // Alimentamos o hasher de forma incremental para evitar formatações de string na heap
+    // We feed the hasher incrementally to avoid string formatting on the heap
     if let Some(model) = payload["model"].as_str() {
         hasher.update(model.as_bytes());
     } else {
@@ -13,7 +13,7 @@ pub fn generate_cache_key(payload: &Value) -> String {
     }
     hasher.update(b"|");
 
-    // Em vez de serializar o array completo para uma String, passamos os bytes do JSON bruto diretamente
+    // Instead of serializing the entire array to a String, we pass the raw JSON bytes directly
     if let Ok(messages_bytes) = serde_json::to_vec(&payload["messages"]) {
         hasher.update(&messages_bytes);
     }
