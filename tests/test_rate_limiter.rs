@@ -27,11 +27,6 @@ async fn test_rate_limiter_fail_open_allows_unlimited_requests() {
 
     let app = common::setup_test_app(mock_server.uri());
 
-    let payload = json!({
-        "model": "llama2",
-        "messages": [{"role": "user", "content": "Hello"}]
-    });
-
     // Send 10 rapid-fire requests. All should pass because Redis is None.
     for i in 0..10 {
         // Change the content slightly on each iteration to bypass the Moka Cache
