@@ -248,7 +248,7 @@ pub async fn chat_completions_handler(
         });
 
         let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-        return Ok((status, res_headers, body).into_response());
+        Ok((status, res_headers, body).into_response())
     } else {
         // --- NON-STREAMING MODE ---
         let response_text = response.text().await.map_err(|e| {
@@ -280,6 +280,6 @@ pub async fn chat_completions_handler(
             axum::http::HeaderValue::from_static("application/json"),
         );
 
-        return Ok((status, res_headers, response_text).into_response());
+        Ok((status, res_headers, response_text).into_response())
     }
 }
