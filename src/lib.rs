@@ -2,6 +2,8 @@
 pub mod cache;
 pub mod handlers;
 
+pub mod utils;
+
 mod middleware;
 use middleware::RateLimitLayer;
 use axum::Router;
