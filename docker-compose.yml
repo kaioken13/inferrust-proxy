@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: inferrust-redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  proxy:
+    build: .
+    container_name: inferrust-proxy
+    ports:
+      - "3000:3000"
+    environment:
+      - RUST_LOG=info
+      - REDIS_URL=redis://redis:6379
+      - BACKEND_URLS=http://host.docker.internal:11434
+    depends_on:
+      - redis
+    restart: always
