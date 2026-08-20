@@ -54,7 +54,7 @@ sequenceDiagram
                     GPU_B-->>Proxy: Response B complete (Hedge won!)
                 end
                 
-                Note over Proxy: Drop slower request; preserve resources
+                Note over Proxy: Drop slower request, preserving resources
             end
 
             alt Stream Mode (is_stream = true)
