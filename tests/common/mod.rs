@@ -11,9 +11,12 @@ pub fn setup_test_app(backend_url: String) -> axum::Router {
 
     let state = Arc::new(AppState {
         http_client: Client::new(),
-        backend_url,
+        backend_urls: vec![backend_url],
         cache: Cache::new(100),
         tokenizer,
+        next_replica: std::sync::atomic::AtomicUsize::new(0),
+        latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
+        redis_client: redis::Client::open("redis://127.0.0.1:6379").unwrap(),
     });
     
     create_app(state)
