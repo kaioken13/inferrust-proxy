@@ -25,7 +25,9 @@ async fn test_health_check_returns_ok() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // Read the body and parse it as JSON
-    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
 
     // The new assertions that match your refactored handler!
@@ -45,12 +47,10 @@ async fn test_proxy_forwards_payload_to_backend() {
             "model": "llama2",
             "messages": [{"role": "user", "content": "Hello"}]
         })))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(json!({
-                "id": "cmpl-mock",
-                "choices": [{"message": {"content": "Hello from mock!"}}]
-            })),
-        )
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-mock",
+            "choices": [{"message": {"content": "Hello from mock!"}}]
+        })))
         .mount(&mock_server)
         .await;
 
@@ -145,13 +145,14 @@ async fn test_proxy_forwards_headers_to_backend() {
     // Backend mock: Ensures that the Authorization header reaches the backend
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/v1/chat/completions"))
-        .and(wiremock::matchers::header("Authorization", "Bearer my-secret-token"))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(json!({
-                "id": "cmpl-header",
-                "choices": [{"message": {"content": "Authorized!"}}]
-            })),
-        )
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer my-secret-token",
+        ))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-header",
+            "choices": [{"message": {"content": "Authorized!"}}]
+        })))
         .expect(1)
         .mount(&mock_server)
         .await;

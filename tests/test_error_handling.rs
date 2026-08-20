@@ -1,7 +1,10 @@
 // tests/test_error_handling.rs
 mod common;
 
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -71,10 +74,13 @@ async fn test_error_502_returns_structured_json() {
 
     // Validate if the Error is structured as valid JSON
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json_error: Value = serde_json::from_slice(&body_bytes).expect("Error response is not valid JSON!");
+    let json_error: Value =
+        serde_json::from_slice(&body_bytes).expect("Error response is not valid JSON!");
 
     // It MUST contain the "error" -> "message" format we implemented in handlers.rs
-    let error_message = json_error["error"]["message"].as_str().expect("Missing error.message in JSON");
+    let error_message = json_error["error"]["message"]
+        .as_str()
+        .expect("Missing error.message in JSON");
     assert!(error_message.contains("Failed to communicate"));
 }
 
@@ -84,7 +90,7 @@ async fn test_error_502_returns_structured_json() {
 #[ignore = "Requires local Redis instance running on port 6379"]
 async fn test_error_429_on_rate_limit_exceeded() {
     let mock_server = wiremock::MockServer::start().await;
-    
+
     // The mock server doesn't need to expect a specific number of calls here,
     // we just need it to respond so the proxy doesn't fail with 502 before hitting 429.
     wiremock::Mock::given(wiremock::matchers::method("POST"))
@@ -103,7 +109,8 @@ async fn test_error_429_on_rate_limit_exceeded() {
     let mut hit_429 = false;
 
     // Bombard the server to force the 429 error
-    for _ in 0..200 { // Adjust this number if your limit is higher
+    for _ in 0..200 {
+        // Adjust this number if your limit is higher
         let mut request = Request::builder()
             .uri("/v1/chat/completions")
             .method("POST")
@@ -112,23 +119,29 @@ async fn test_error_429_on_rate_limit_exceeded() {
             .unwrap();
 
         // Inject a dedicated IP specifically for the Error Handling test
-        request.extensions_mut().insert(axum::extract::ConnectInfo(
-            std::net::SocketAddr::from(([8, 8, 8, 8], 80))
-        ));
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [8, 8, 8, 8],
+                80,
+            ))));
 
         let response = app.clone().oneshot(request).await.unwrap();
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
             hit_429 = true;
-            
+
             // Note: In your middleware.rs, you currently return:
             // Ok(StatusCode::TOO_MANY_REQUESTS.into_response())
-            // Which means the body is empty. If you ever change it to return a JSON error 
+            // Which means the body is empty. If you ever change it to return a JSON error
             // like the 502, you would assert that JSON structure right here!
-            
+
             break;
         }
     }
 
-    assert!(hit_429, "Expected the proxy to eventually return a 429 Too Many Requests error");
+    assert!(
+        hit_429,
+        "Expected the proxy to eventually return a 429 Too Many Requests error"
+    );
 }

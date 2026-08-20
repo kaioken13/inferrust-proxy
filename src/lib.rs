@@ -5,8 +5,8 @@ pub mod handlers;
 pub mod utils;
 
 mod middleware;
-use middleware::RateLimitLayer;
 use axum::Router;
+use middleware::RateLimitLayer;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 
@@ -29,7 +29,10 @@ pub async fn app(state: Arc<AppState>) -> axum::Router {
     };
 
     axum::Router::new()
-        .route("/v1/chat/completions", axum::routing::post(chat_completions_handler))
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(chat_completions_handler),
+        )
         .layer(rate_limit_layer) //
         .with_state(state)
 }
@@ -43,7 +46,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", axum::routing::get(health_handler))
-        .route("/v1/chat/completions", axum::routing::post(chat_completions_handler))
-        .layer(rate_limit_layer) 
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(chat_completions_handler),
+        )
+        .layer(rate_limit_layer)
         .with_state(state)
 }

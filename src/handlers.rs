@@ -1,7 +1,7 @@
 // src/handlers.rs
-use axum::Json;
-use axum::response::IntoResponse;
 use crate::AppState;
+use axum::response::IntoResponse;
+use axum::Json;
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -53,18 +53,30 @@ pub async fn chat_completions_handler(
     if let Some(cached_data) = state.cache.get(&cache_key).await {
         if let Ok(entry) = serde_json::from_str::<CacheEntry>(&cached_data) {
             tracing::info!(key = %cache_key, "Cache HIT");
-            
+
             let mut res_headers = axum::http::HeaderMap::new();
             res_headers.insert("x-prompt-tokens", entry.prompt_tokens.into());
-            
+
             if is_stream {
-                res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
-                res_headers.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
-                res_headers.insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("keep-alive"));
+                res_headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("text/event-stream"),
+                );
+                res_headers.insert(
+                    axum::http::header::CACHE_CONTROL,
+                    axum::http::HeaderValue::from_static("no-cache"),
+                );
+                res_headers.insert(
+                    axum::http::header::CONNECTION,
+                    axum::http::HeaderValue::from_static("keep-alive"),
+                );
             } else {
-                res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
+                res_headers.insert(
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("application/json"),
+                );
             }
-            
+
             return Ok((res_headers, axum::body::Body::from(entry.response_json)).into_response());
         }
     }
@@ -80,51 +92,56 @@ pub async fn chat_completions_handler(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let prompt_tokens = state.tokenizer.encode(full_text.to_string(), false)
+    let prompt_tokens = state
+        .tokenizer
+        .encode(full_text.to_string(), false)
         .map(|encoded| encoded.get_ids().len())
         .unwrap_or(0);
-
 
     // 5. Prepare Idempotency, Dynamic p95 Timeout, and Load Balancing
     let idempotency_key = uuid::Uuid::new_v4().to_string();
     let total_replicas = state.backend_urls.len();
-    let current_idx = state.next_replica.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let current_idx = state
+        .next_replica
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let idx_a = current_idx % total_replicas;
     let url_a = format!("{}/v1/chat/completions", state.backend_urls[idx_a]);
-    
+
     let client = state.http_client.clone();
     let payload_clone = payload.clone();
     let p95_ms = get_p95_timeout(&state);
     let dynamic_timeout = std::time::Duration::from_millis(p95_ms);
 
     // 6. Build Request A
-    let req_a = async { 
-        let mut builder = client.post(&url_a)
+    let req_a = async {
+        let mut builder = client
+            .post(&url_a)
             .header("Idempotency-Key", &idempotency_key)
             .json(&payload);
-            
+
         if let Some(auth) = &auth_header {
             builder = builder.header("Authorization", auth);
         }
-        builder.send().await 
+        builder.send().await
     };
     tokio::pin!(req_a);
 
     // 7. Execute Request (With Hedging if applicable)
     let response = if total_replicas <= 1 {
-        let mut builder = client.post(&url_a)
+        let mut builder = client
+            .post(&url_a)
             .header("Idempotency-Key", &idempotency_key)
             .json(&payload);
-            
+
         if let Some(auth) = &auth_header {
             builder = builder.header("Authorization", auth);
         }
 
-        builder.send().await
-            .map_err(|e| {
-                let err_json = serde_json::json!({"error": {"message": format!("Failed to communicate: {}", e)}});
-                (axum::http::StatusCode::BAD_GATEWAY, err_json.to_string())
-            })?
+        builder.send().await.map_err(|e| {
+            let err_json =
+                serde_json::json!({"error": {"message": format!("Failed to communicate: {}", e)}});
+            (axum::http::StatusCode::BAD_GATEWAY, err_json.to_string())
+        })?
     } else {
         let res = tokio::select! {
             res = &mut req_a => {
@@ -135,15 +152,15 @@ pub async fn chat_completions_handler(
                 tracing::warn!("Tail latency detected. Firing Hedged Request...");
                 let idx_b = (idx_a + 1) % total_replicas;
                 let url_b = format!("{}/v1/chat/completions", state.backend_urls[idx_b]);
-                
-                let req_b = async { 
+
+                let req_b = async {
                     let mut builder = client.post(&url_b)
                         .header("Idempotency-Key", &idempotency_key)
                         .json(&payload_clone);
                     if let Some(auth) = &auth_header {
                         builder = builder.header("Authorization", auth);
                     }
-                    builder.send().await 
+                    builder.send().await
                 };
                 tokio::pin!(req_b);
 
@@ -156,9 +173,10 @@ pub async fn chat_completions_handler(
                 }
             }
         };
-        
+
         res.map_err(|e| {
-            let err_json = serde_json::json!({"error": {"message": format!("Failed to communicate: {}", e)}});
+            let err_json =
+                serde_json::json!({"error": {"message": format!("Failed to communicate: {}", e)}});
             (axum::http::StatusCode::BAD_GATEWAY, err_json.to_string())
         })?
     };
@@ -169,7 +187,9 @@ pub async fn chat_completions_handler(
     let duration = start.elapsed().as_millis() as u64;
     {
         let mut latencies = state.latencies.write().unwrap();
-        if latencies.len() >= 100 { latencies.pop_front(); }
+        if latencies.len() >= 100 {
+            latencies.pop_front();
+        }
         latencies.push_back(duration);
     }
 
@@ -177,13 +197,22 @@ pub async fn chat_completions_handler(
     if is_stream {
         // --- STREAMING MODE (SSE) ---
         let mut res_headers = axum::http::HeaderMap::new();
-        res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
-        res_headers.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
-        res_headers.insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("keep-alive"));
+        res_headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("text/event-stream"),
+        );
+        res_headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+        res_headers.insert(
+            axum::http::header::CONNECTION,
+            axum::http::HeaderValue::from_static("keep-alive"),
+        );
 
         let mut stream = response.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(128);
-        
+
         let state_clone = state.clone();
         let cache_key_clone = cache_key.clone();
         let prompt_tokens_clone = prompt_tokens;
@@ -195,16 +224,21 @@ pub async fn chat_completions_handler(
                 match chunk_result {
                     Ok(chunk) => {
                         cache_buffer.extend_from_slice(&chunk);
-                        if tx.send(Ok(chunk)).await.is_err() { break; }
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
                     }
-                    Err(e) => { let _ = tx.send(Err(e)).await; break; }
+                    Err(e) => {
+                        let _ = tx.send(Err(e)).await;
+                        break;
+                    }
                 }
             }
             if !cache_buffer.is_empty() && status.is_success() {
                 if let Ok(full_sse_text) = String::from_utf8(cache_buffer) {
-                    let cache_entry = CacheEntry { 
-                        response_json: full_sse_text, 
-                        prompt_tokens: prompt_tokens_clone
+                    let cache_entry = CacheEntry {
+                        response_json: full_sse_text,
+                        prompt_tokens: prompt_tokens_clone,
                     };
                     if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
                         state_clone.cache.insert(cache_key_clone, entry_json).await;
@@ -215,12 +249,14 @@ pub async fn chat_completions_handler(
 
         let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
         return Ok((status, res_headers, body).into_response());
-
     } else {
         // --- NON-STREAMING MODE ---
         let response_text = response.text().await.map_err(|e| {
             tracing::error!("Failed to extract response text: {}", e);
-            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract text".to_string())
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to extract text".to_string(),
+            )
         })?;
 
         // Cache Poisoning Shield (Only cache 200 OK)
@@ -229,7 +265,7 @@ pub async fn chat_completions_handler(
                 response_json: response_text.clone(),
                 prompt_tokens,
             };
-            
+
             if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
                 state.cache.insert(cache_key, entry_json).await;
             }
@@ -239,7 +275,10 @@ pub async fn chat_completions_handler(
 
         let mut res_headers = axum::http::HeaderMap::new();
         res_headers.insert("x-prompt-tokens", prompt_tokens.into());
-        res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
+        res_headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
 
         return Ok((status, res_headers, response_text).into_response());
     }

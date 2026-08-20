@@ -1,5 +1,10 @@
 // src/middleware.rs
-use axum::{body::Body, extract::Request, http::{StatusCode, Response}, response::IntoResponse};
+use axum::{
+    body::Body,
+    extract::Request,
+    http::{Response, StatusCode},
+    response::IntoResponse,
+};
 use tower::{Layer, Service};
 
 #[derive(Clone)]
@@ -36,7 +41,10 @@ where
     type Error = S::Error;
     type Future = futures::future::BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
     }
 
@@ -61,11 +69,14 @@ where
             let mut conn = match client.get_multiplexed_async_connection().await {
                 Ok(c) => c,
                 Err(e) => {
-                    tracing::error!("Redis connection failed (Fail-Open): {}. Passing through.", e);
+                    tracing::error!(
+                        "Redis connection failed (Fail-Open): {}. Passing through.",
+                        e
+                    );
                     return inner.call(req).await;
                 }
             };
-            
+
             let key = format!("rate_limit:{}", client_ip);
 
             // Atomic approach: Use a transaction to ensure INCR and EXPIRE are linked
@@ -80,7 +91,10 @@ where
             let count = match result {
                 Ok((val, _)) => val,
                 Err(e) => {
-                    tracing::error!("Failed to execute atomic rate limit in Redis: {}. Failing open.", e);
+                    tracing::error!(
+                        "Failed to execute atomic rate limit in Redis: {}. Failing open.",
+                        e
+                    );
                     return inner.call(req).await;
                 }
             };

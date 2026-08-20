@@ -4,7 +4,7 @@ mod common;
 use axum::{body::Body, http::Request, Router};
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use tower::{ServiceExt};
+use tower::ServiceExt;
 use wiremock::{matchers, Mock, MockServer, ResponseTemplate};
 
 /// Helper function exclusive to this test to avoid code repetition
@@ -16,10 +16,10 @@ async fn send_request(app: &Router, payload: &Value) -> Value {
         .body(Body::from(payload.to_string()))
         .unwrap();
 
-    // Unlike .oneshot() which consumes the route, .ready().call() allows 
+    // Unlike .oneshot() which consumes the route, .ready().call() allows
     // us to reuse the same App instance multiple times!
     let response = app.clone().oneshot(request).await.unwrap();
-    
+
     // Extract the body and convert it back to JSON for validation
     let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body_bytes).unwrap()
@@ -34,12 +34,10 @@ async fn test_cache_returns_cached_response_on_second_request() {
     // Backend mock: MUST be called EXACTLY ONCE
     Mock::given(matchers::method("POST"))
         .and(matchers::path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "cmpl-123",
-                "choices": [{"message": {"content": "Mock response"}}]
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-123",
+            "choices": [{"message": {"content": "Mock response"}}]
+        })))
         .expect(1) // Expect exactly one call to this mock
         .mount(&mock_server)
         .await;
@@ -54,11 +52,17 @@ async fn test_cache_returns_cached_response_on_second_request() {
 
     // 3. 1st request: Cache is empty, it must hit Wiremock (MISS)
     let response1 = send_request(&app, &payload).await;
-    assert_eq!(response1["choices"][0]["message"]["content"], "Mock response");
+    assert_eq!(
+        response1["choices"][0]["message"]["content"],
+        "Mock response"
+    );
 
     // 4. 2nd request: It must come directly from the cache (HIT) - WITHOUT hitting Wiremock
     let response2 = send_request(&app, &payload).await;
-    assert_eq!(response2["choices"][0]["message"]["content"], "Mock response");
+    assert_eq!(
+        response2["choices"][0]["message"]["content"],
+        "Mock response"
+    );
 
     // Wiremock magic: If the second request leaked to the network,
     // the mock_server would fail the test right now because we demanded .expect(1).
@@ -74,12 +78,10 @@ async fn test_cache_poisoning_prevention_with_different_temperature() {
     // If cache poisoning was occurring, it would only be called once.
     Mock::given(matchers::method("POST"))
         .and(matchers::path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "cmpl-diff",
-                "choices": [{"message": {"content": "Response"}}]
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-diff",
+            "choices": [{"message": {"content": "Response"}}]
+        })))
         .expect(2) // We expect 2 network calls (2 cache misses)
         .mount(&mock_server)
         .await;
@@ -149,23 +151,39 @@ async fn test_cache_returns_cached_sse_for_streaming_requests() {
     // 1st request: Miss (Hits MockServer and gets cached by your Write-Behind logic)
     let response1 = app.clone().oneshot(build_req()).await.unwrap();
     assert_eq!(response1.status(), axum::http::StatusCode::OK);
-    
+
     // Consume the body to complete the request
-    let _ = http_body_util::BodyExt::collect(response1.into_body()).await.unwrap().to_bytes();
+    let _ = http_body_util::BodyExt::collect(response1.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
 
     // 2nd request: HIT (Served from Cache with SSE headers)
     let response2 = app.clone().oneshot(build_req()).await.unwrap();
     assert_eq!(response2.status(), axum::http::StatusCode::OK);
 
     // Validate if your proxy correctly restored the SSE headers from the cache
-    let content_type = response2.headers().get("content-type").unwrap().to_str().unwrap();
+    let content_type = response2
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(content_type, "text/event-stream");
 
-    let cache_control = response2.headers().get("cache-control").unwrap().to_str().unwrap();
+    let cache_control = response2
+        .headers()
+        .get("cache-control")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert_eq!(cache_control, "no-cache");
 
     // Validate the body content
-    let body_bytes = http_body_util::BodyExt::collect(response2.into_body()).await.unwrap().to_bytes();
+    let body_bytes = http_body_util::BodyExt::collect(response2.into_body())
+        .await
+        .unwrap()
+        .to_bytes();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
     assert!(body_str.contains("Stream "));
     assert!(body_str.contains("[DONE]"));
@@ -182,12 +200,10 @@ async fn test_cache_expires_after_ttl() {
     // 2nd time: Miss after the cache has expired.
     Mock::given(matchers::method("POST"))
         .and(matchers::path("/v1/chat/completions"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "id": "cmpl-ttl",
-                "choices": [{"message": {"content": "TTL Response"}}]
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-ttl",
+            "choices": [{"message": {"content": "TTL Response"}}]
+        })))
         .expect(2) // We expect exactly 2 network calls
         .mount(&mock_server)
         .await;
@@ -207,9 +223,9 @@ async fn test_cache_expires_after_ttl() {
     // 2nd request immediately: HIT (Does NOT hit Wiremock)
     let response2 = send_request(&app, &payload).await;
     assert_eq!(response2["id"], "cmpl-ttl");
-    
+
     tracing::info!("Sleeping for 3 seconds to let the cache expire...");
-    
+
     // Simulate time passing: Sleep for 3 seconds (1 second longer than our TTL)
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
