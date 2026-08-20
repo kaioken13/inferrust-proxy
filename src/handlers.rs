@@ -71,6 +71,20 @@ pub async fn chat_completions_handler(
 
     tracing::info!(key = %cache_key, "Cache MISS. Processing request...");
 
+    // Extract full_text for the Tokenizer
+    let full_text = payload["messages"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let prompt_tokens = state.tokenizer.encode(full_text.to_string(), false)
+        .map(|encoded| encoded.get_ids().len())
+        .unwrap_or(0);
+
+
     // 5. Prepare Idempotency, Dynamic p95 Timeout, and Load Balancing
     let idempotency_key = uuid::Uuid::new_v4().to_string();
     let total_replicas = state.backend_urls.len();
@@ -172,6 +186,7 @@ pub async fn chat_completions_handler(
         
         let state_clone = state.clone();
         let cache_key_clone = cache_key.clone();
+        let prompt_tokens_clone = prompt_tokens;
 
         // Background worker: intercept chunks and save to cache when done
         tokio::spawn(async move {
@@ -187,7 +202,10 @@ pub async fn chat_completions_handler(
             }
             if !cache_buffer.is_empty() && status.is_success() {
                 if let Ok(full_sse_text) = String::from_utf8(cache_buffer) {
-                    let cache_entry = CacheEntry { response_json: full_sse_text, prompt_tokens: 0 };
+                    let cache_entry = CacheEntry { 
+                        response_json: full_sse_text, 
+                        prompt_tokens: prompt_tokens_clone
+                    };
                     if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
                         state_clone.cache.insert(cache_key_clone, entry_json).await;
                     }
@@ -204,19 +222,6 @@ pub async fn chat_completions_handler(
             tracing::error!("Failed to extract response text: {}", e);
             (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract text".to_string())
         })?;
-
-        // Extract full_text for the Tokenizer
-        let full_text = payload["messages"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let prompt_tokens = state.tokenizer.encode(full_text.to_string(), false)
-            .map(|encoded| encoded.get_ids().len())
-            .unwrap_or(0);
 
         // Cache Poisoning Shield (Only cache 200 OK)
         if status.is_success() {

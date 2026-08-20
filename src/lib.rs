@@ -35,9 +35,15 @@ pub async fn app(state: Arc<AppState>) -> axum::Router {
 }
 
 pub fn create_app(state: Arc<AppState>) -> Router {
+    // Configure the Rate Limit middleware using the Redis client from the state
+    let rate_limit_layer = crate::middleware::RateLimitLayer {
+        redis_client: state.redis_client.clone(),
+        limit: 100, // 100 req/min per IP
+    };
+
     Router::new()
         .route("/health", axum::routing::get(health_handler))
-        // Agora o handler retorna axum::response::Response para suportar zero-copy
         .route("/v1/chat/completions", axum::routing::post(chat_completions_handler))
+        .layer(rate_limit_layer) 
         .with_state(state)
 }
