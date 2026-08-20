@@ -135,3 +135,46 @@ async fn test_invalid_json_returns_bad_request() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+// 5. TEST: Proxy Forwards Headers to Backend
+#[tokio::test]
+async fn test_proxy_forwards_headers_to_backend() {
+    let mock_server = wiremock::MockServer::start().await;
+    let backend_url = mock_server.uri();
+
+    // Backend mock: Ensures that the Authorization header reaches the backend
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .and(wiremock::matchers::header("Authorization", "Bearer my-secret-token"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "id": "cmpl-header",
+                "choices": [{"message": {"content": "Authorized!"}}]
+            })),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let app = common::setup_test_app(backend_url);
+
+    let payload = json!({
+        "model": "llama2",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/chat/completions")
+                .method("POST")
+                .header("content-type", "application/json")
+                .header("Authorization", "Bearer my-secret-token") // Injecting the header
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}

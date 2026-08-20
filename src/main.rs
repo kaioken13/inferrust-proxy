@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cache,
         tokenizer,
         latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
-        redis_client,
+        redis_client: Some(redis_client),
     });
 
     let app = create_app(state);

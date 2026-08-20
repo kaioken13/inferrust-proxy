@@ -6,7 +6,7 @@ use crate::AppState;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
-use sha2::Digest;
+use crate::cache::generate_cache_key;
 use futures::StreamExt;
 
 #[derive(Serialize, Deserialize)]
@@ -44,272 +44,209 @@ fn get_p95_timeout(state: &AppState) -> u64 {
 
 pub async fn chat_completions_handler(
     axum::extract::State(state): axum::extract::State<std::sync::Arc<AppState>>,
-    axum::Json(payload): axum::Json<serde_json::Value>,
-) -> Result<impl axum::response::IntoResponse, (axum::http::StatusCode, String)> {
-    
+    headers: axum::http::HeaderMap,
+    axum::Json(payload): axum::extract::Json<serde_json::Value>,
+) -> Result<axum::response::Response, (axum::http::StatusCode, String)> {
     // 1. Capture start time for dynamic p95 calculation
     let start = std::time::Instant::now();
 
-    // 2. Generate Cache Key using Bincode/SHA-256
-    let mut hasher = sha2::Sha256::new();
-    if let Ok(canonical_messages) = serde_json::from_value::<Vec<ChatMessage>>(payload["messages"].clone()) {
-        if let Ok(binary_bytes) = bincode::serialize(&canonical_messages) {
-            sha2::Digest::update(&mut hasher, &binary_bytes);
-        } else {
-            tracing::warn!("Failed to serialize messages to binary.");
-        }
-    } else {
-        tracing::warn!("Payload does not contain a valid messages format for caching.");
-    }
-    let cache_key = format!("{:x}", hasher.finalize());
+    // 2. Extract Authorization header if present
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_string());
 
+    // 3. Generate Cache Key using robust key generator
+    let cache_key = generate_cache_key(&payload); // Adjust path if needed
     let is_stream = payload["stream"].as_bool().unwrap_or(false);
 
-    if is_stream {
-        tracing::info!(key = %cache_key, "STREAM mode detected. Initiating SSE...");
-
-        // 1. FAST PATH: Cache HIT for Stream
-        // We return the raw accumulated SSE string. The client will parse the events instantly.
-        if let Some(cached_data) = state.cache.get(&cache_key).await {
-            if let Ok(entry) = serde_json::from_str::<CacheEntry>(&cached_data) {
-                tracing::info!(key = %cache_key, "Cache HIT (Stream)");
-                
-                let mut headers = axum::http::HeaderMap::new();
-                headers.insert("x-prompt-tokens", entry.prompt_tokens.into());
-                headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
-                headers.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
-                headers.insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("keep-alive"));
-                
-                return Ok((headers, axum::body::Body::from(entry.response_json)).into_response());
+    // 4. FAST PATH: Cache HIT (Handles both Stream and Non-Stream)
+    if let Some(cached_data) = state.cache.get(&cache_key).await {
+        if let Ok(entry) = serde_json::from_str::<CacheEntry>(&cached_data) {
+            tracing::info!(key = %cache_key, "Cache HIT");
+            
+            let mut res_headers = axum::http::HeaderMap::new();
+            res_headers.insert("x-prompt-tokens", entry.prompt_tokens.into());
+            
+            if is_stream {
+                res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
+                res_headers.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
+                res_headers.insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("keep-alive"));
+            } else {
+                res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
             }
+            
+            return Ok((res_headers, axum::body::Body::from(entry.response_json)).into_response());
+        }
+    }
+
+    tracing::info!(key = %cache_key, "Cache MISS. Processing request...");
+
+    // 5. Prepare Idempotency, Dynamic p95 Timeout, and Load Balancing
+    let idempotency_key = uuid::Uuid::new_v4().to_string();
+    let total_replicas = state.backend_urls.len();
+    let current_idx = state.next_replica.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let idx_a = current_idx % total_replicas;
+    let url_a = format!("{}/v1/chat/completions", state.backend_urls[idx_a]);
+    
+    let client = state.http_client.clone();
+    let payload_clone = payload.clone();
+    let p95_ms = get_p95_timeout(&state);
+    let dynamic_timeout = std::time::Duration::from_millis(p95_ms);
+
+    // 6. Build Request A
+    let req_a = async { 
+        let mut builder = client.post(&url_a)
+            .header("Idempotency-Key", &idempotency_key)
+            .json(&payload);
+            
+        if let Some(auth) = &auth_header {
+            builder = builder.header("Authorization", auth);
+        }
+        builder.send().await 
+    };
+    tokio::pin!(req_a);
+
+    // 7. Execute Request (With Hedging if applicable)
+    let response = if total_replicas <= 1 {
+        let mut builder = client.post(&url_a)
+            .header("Idempotency-Key", &idempotency_key)
+            .json(&payload);
+            
+        if let Some(auth) = &auth_header {
+            builder = builder.header("Authorization", auth);
         }
 
-        // 2. Cache MISS: Proceed with Hedged Request measuring TTFT (Time To First Token)
-        let idempotency_key = uuid::Uuid::new_v4().to_string();
-        let total_replicas = state.backend_urls.len();
-        let current_idx = state.next_replica.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let idx_a = current_idx % total_replicas;
-        let url_a = format!("{}/v1/chat/completions", state.backend_urls[idx_a]);
-        
-        let client = state.http_client.clone();
-        let payload_clone = payload.clone();
-        let p95_ms = get_p95_timeout(&state);
-        let dynamic_timeout = std::time::Duration::from_millis(p95_ms);
-
-        let req_a = client.post(&url_a).header("Idempotency-Key", &idempotency_key).json(&payload).send();
-        
-        let response = tokio::select! {
-            res = req_a => {
-                tracing::debug!("Fast TTFT (Time to First Token). Resolved without Hedge.");
+        builder.send().await
+            .map_err(|e| {
+                let err_json = serde_json::json!({"error": {"message": format!("Failed to communicate: {}", e)}});
+                (axum::http::StatusCode::BAD_GATEWAY, err_json.to_string())
+            })?
+    } else {
+        let res = tokio::select! {
+            res = &mut req_a => {
+                tracing::debug!("Fast response. Resolved without Hedge.");
                 res
             },
             _ = tokio::time::sleep(dynamic_timeout) => {
-                tracing::warn!("Tail latency on TTFT (p95: {}ms). Firing Hedged Request...", p95_ms);
-                let url_b = format!("{}/v1/chat/completions", state.backend_urls[(idx_a + 1) % total_replicas]);
-                client.post(&url_b).header("Idempotency-Key", &idempotency_key).json(&payload_clone).send().await
+                tracing::warn!("Tail latency detected. Firing Hedged Request...");
+                let idx_b = (idx_a + 1) % total_replicas;
+                let url_b = format!("{}/v1/chat/completions", state.backend_urls[idx_b]);
+                
+                let req_b = async { 
+                    let mut builder = client.post(&url_b)
+                        .header("Idempotency-Key", &idempotency_key)
+                        .json(&payload_clone);
+                    if let Some(auth) = &auth_header {
+                        builder = builder.header("Authorization", auth);
+                    }
+                    builder.send().await 
+                };
+                tokio::pin!(req_b);
+
+                tokio::select! {
+                    res_a = &mut req_a => res_a,
+                    res_b = &mut req_b => {
+                        tracing::info!("The Hedged Request won the race and saved tail latency!");
+                        res_b
+                    },
+                }
             }
-        }.map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e.to_string()))?;
+        };
+        
+        res.map_err(|e| {
+            let err_json = serde_json::json!({"error": {"message": format!("Failed to communicate: {}", e)}});
+            (axum::http::StatusCode::BAD_GATEWAY, err_json.to_string())
+        })?
+    };
 
-        // 3. Record TTFT metrics
-        let ttft_duration = start.elapsed().as_millis() as u64;
-        {
-            let mut latencies = state.latencies.write().unwrap();
-            if latencies.len() >= 100 { latencies.pop_front(); }
-            latencies.push_back(ttft_duration);
-        }
+    let status = response.status();
 
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
-        headers.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
-        headers.insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("keep-alive"));
+    // 8. Record TTFT metrics synchronously
+    let duration = start.elapsed().as_millis() as u64;
+    {
+        let mut latencies = state.latencies.write().unwrap();
+        if latencies.len() >= 100 { latencies.pop_front(); }
+        latencies.push_back(duration);
+    }
 
-        // 4. Set up the Write-Behind Cache mechanism
+    // 9. Process the Response based on Stream or Non-Stream Mode
+    if is_stream {
+        // --- STREAMING MODE (SSE) ---
+        let mut res_headers = axum::http::HeaderMap::new();
+        res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/event-stream"));
+        res_headers.insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-cache"));
+        res_headers.insert(axum::http::header::CONNECTION, axum::http::HeaderValue::from_static("keep-alive"));
+
         let mut stream = response.bytes_stream();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, reqwest::Error>>(128);
         
         let state_clone = state.clone();
         let cache_key_clone = cache_key.clone();
 
-        // Background worker: intercept chunks, forward to client, and save to cache when done
+        // Background worker: intercept chunks and save to cache when done
         tokio::spawn(async move {
             let mut cache_buffer = Vec::new();
-
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        // Append to local buffer for caching
                         cache_buffer.extend_from_slice(&chunk);
-                        
-                        // Stream instantly to the connected client
-                        if tx.send(Ok(chunk)).await.is_err() {
-                            tracing::warn!("Client disconnected prematurely during streaming.");
-                            break;
-                        }
+                        if tx.send(Ok(chunk)).await.is_err() { break; }
                     }
-                    Err(e) => {
-                        tracing::error!("Error reading backend stream: {}", e);
-                        let _ = tx.send(Err(e)).await;
-                        break;
-                    }
+                    Err(e) => { let _ = tx.send(Err(e)).await; break; }
                 }
             }
-
-            // 5. Stream completed. Cache the full accumulated payload in the background
-            if !cache_buffer.is_empty() {
+            if !cache_buffer.is_empty() && status.is_success() {
                 if let Ok(full_sse_text) = String::from_utf8(cache_buffer) {
-                    // Note: Extracting token usage from SSE chunks requires parsing the final [DONE] chunk in standard APIs.
-                    // For proxy performance, we store it as a raw payload with zeroed token count, or parse it if strictly required.
-                    let cache_entry = CacheEntry {
-                        response_json: full_sse_text,
-                        prompt_tokens: 0, 
-                    };
-                    
+                    let cache_entry = CacheEntry { response_json: full_sse_text, prompt_tokens: 0 };
                     if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
                         state_clone.cache.insert(cache_key_clone, entry_json).await;
-                        tracing::info!("Write-Behind Cache insertion completed for SSE stream.");
                     }
                 }
             }
         });
 
-        // 6. Convert our receiver channel into an Axum body and return immediately
         let body = axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-        return Ok((headers, body).into_response());
+        return Ok((status, res_headers, body).into_response());
+
     } else {
-        tracing::info!("NON-STREAM mode detected. Waiting for complete block...");
-    }
+        // --- NON-STREAMING MODE ---
+        let response_text = response.text().await.map_err(|e| {
+            tracing::error!("Failed to extract response text: {}", e);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract text".to_string())
+        })?;
 
-    // 3. FAST PATH: Cache HIT
-    if let Some(cached_data) = state.cache.get(&cache_key).await {
-        if let Ok(entry) = serde_json::from_str::<CacheEntry>(&cached_data) {
-            tracing::info!(key = %cache_key, "Cache HIT");
-            
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert("x-prompt-tokens", entry.prompt_tokens.into());
-            headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
-            
-            return Ok((headers, axum::body::Body::from(entry.response_json)).into_response());
-        }
-    }
+        // Extract full_text for the Tokenizer
+        let full_text = payload["messages"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
 
-    tracing::info!(key = %cache_key, "Cache MISS. Processing request...");
+        let prompt_tokens = state.tokenizer.encode(full_text.to_string(), false)
+            .map(|encoded| encoded.get_ids().len())
+            .unwrap_or(0);
 
-    // 4. Prepare Idempotency, Dynamic p95 Timeout, and Load Balancing
-    let idempotency_key = uuid::Uuid::new_v4().to_string();
-    tracing::debug!("Generating Idempotency-Key: {}", idempotency_key);
-
-    let total_replicas = state.backend_urls.len();
-    let current_idx = state.next_replica.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    let idx_a = current_idx % total_replicas;
-    let url_a = format!("{}/v1/chat/completions", state.backend_urls[idx_a]);
-    tracing::debug!("Routing Request A to replica [{}]", url_a);
-
-    let client = state.http_client.clone();
-    let payload_clone = payload.clone();
-
-    // 5. Build Request A (Original)
-    let req_a = async { 
-        client.post(&url_a)
-            .header("Idempotency-Key", &idempotency_key)
-            .json(&payload)
-            .send()
-            .await 
-    };
-    tokio::pin!(req_a);
-
-    // 6. Dynamic p95 Timeout calculation
-    let p95_ms = get_p95_timeout(&state);
-    let dynamic_timeout = std::time::Duration::from_millis(p95_ms);
-
-    // 7. Hedged Request Execution with Dynamic Timeout
-    let response = tokio::select! {
-        res = &mut req_a => {
-            tracing::debug!("Fast backend response. Request resolved without Hedge.");
-            res
-        },
-        _ = tokio::time::sleep(dynamic_timeout) => {
-            tracing::warn!("Tail latency detected (p95: {}ms). Firing Hedged Request...", p95_ms);
-            
-            let idx_b = (idx_a + 1) % total_replicas;
-            let url_b = format!("{}/v1/chat/completions", state.backend_urls[idx_b]);
-            tracing::warn!("Routing Hedged Request B to replica [{}]", url_b);
-
-            let req_b = async { 
-                client.post(&url_b)
-                    .header("Idempotency-Key", &idempotency_key)
-                    .json(&payload_clone)
-                    .send()
-                    .await 
+        // Cache Poisoning Shield (Only cache 200 OK)
+        if status.is_success() {
+            let cache_entry = CacheEntry {
+                response_json: response_text.clone(),
+                prompt_tokens,
             };
-            tokio::pin!(req_b);
-
-            tokio::select! {
-                res_a = &mut req_a => res_a,
-                res_b = &mut req_b => {
-                    tracing::info!("The Hedged Request won the race and saved tail latency!");
-                    res_b
-                },
+            
+            if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
+                state.cache.insert(cache_key, entry_json).await;
             }
+        } else {
+            tracing::warn!("Skipping cache insertion due to non-200 status: {}", status);
         }
-    };
 
-    // 8. Handle connection Result and extract Status BEFORE consuming text
-    let response = response.map_err(|e| {
-        tracing::error!("Backend connection failed: {}", e);
-        (axum::http::StatusCode::BAD_GATEWAY, "Failed to communicate with the model".to_string())
-    })?;
+        let mut res_headers = axum::http::HeaderMap::new();
+        res_headers.insert("x-prompt-tokens", prompt_tokens.into());
+        res_headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
 
-    let status = response.status(); 
-
-    // 9. Await text extraction (IO boundary)
-    let response_text = response.text().await.map_err(|e| {
-        tracing::error!("Failed to extract response text: {}", e);
-        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "Failed to extract text".to_string())
-    })?;
-
-    // 10. Record latency metrics synchronously AFTER all async IO is complete
-    let duration = start.elapsed().as_millis() as u64;
-    {
-        let mut latencies = state.latencies.write().unwrap();
-        if latencies.len() >= 100 { 
-            latencies.pop_front(); 
-        }
-        latencies.push_back(duration);
+        return Ok((status, res_headers, response_text).into_response());
     }
-
-    // 11. Extract full_text for the Tokenizer
-    let full_text = payload["messages"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let text_to_encode = full_text.to_string();
-    let prompt_tokens = state.tokenizer.encode(text_to_encode, false)
-        .map(|encoded| encoded.get_ids().len())
-        .unwrap_or(0);
-
-    // 12. Cache Poisoning Shield (Only cache 200 OK)
-    if status.is_success() {
-        let cache_entry = CacheEntry {
-            response_json: response_text.clone(),
-            prompt_tokens,
-        };
-        
-        if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
-            state.cache.insert(cache_key, entry_json).await;
-        }
-    } else {
-        tracing::warn!("Skipping cache insertion due to non-200 status: {}", status);
-    }
-
-    // 13. Build and return the response
-    let mut headers = axum::http::HeaderMap::new();
-    headers.insert("x-prompt-tokens", prompt_tokens.into());
-    headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("application/json"));
-
-    Ok((status, headers, response_text).into_response())
 }

@@ -17,7 +17,7 @@ pub struct AppState {
     pub cache: moka::future::Cache<String, String>,
     pub tokenizer: Tokenizer,
     pub latencies: std::sync::RwLock<std::collections::VecDeque<u64>>,
-    pub redis_client: redis::Client,
+    pub redis_client: Option<redis::Client>,
 }
 
 pub async fn app(state: Arc<AppState>) -> axum::Router {
