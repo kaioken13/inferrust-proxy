@@ -34,16 +34,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .expect("Failed to build HTTP Client");
 
+    // Reads the Redis URL from the environment or uses the Docker service name as the default
+    let redis_url = std::env::var("REDIS_URL")
+        .unwrap_or_else(|_| "redis://redis:6379".to_string());
+
+    let redis_client =
+        redis::Client::open(redis_url).expect("Failed to initialize Redis client");
+
+    // Keep reading from the backend via env, as you've already correctly implemented:
     let backend_urls_env =
-        std::env::var("BACKEND_URLS").unwrap_or_else(|_| "http://localhost:11434".to_string());
+        std::env::var("BACKEND_URLS").unwrap_or_else(|_| "http://host.docker.internal:11434".to_string());
 
     let backend_urls: Vec<String> = backend_urls_env
         .split(',')
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .collect();
-
-    let redis_client =
-        redis::Client::open("redis://127.0.0.1/").expect("Failed to initialize Redis client");
 
     let state = std::sync::Arc::new(crate::AppState {
         http_client,

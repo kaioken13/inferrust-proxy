@@ -6,6 +6,14 @@ services:
       - "6379:6379"
     restart: always
 
+  ollama:
+    image: ollama/ollama:latest
+    container_name: inferrust-ollama
+    # Removemos o "ports" daqui para evitar conflito na porta 11434 do host!
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: always
+
   proxy:
     build: .
     container_name: inferrust-proxy
@@ -14,7 +22,11 @@ services:
     environment:
       - RUST_LOG=info
       - REDIS_URL=redis://redis:6379
-      - BACKEND_URLS=http://host.docker.internal:11434
+      - BACKEND_URLS=http://ollama:11434
     depends_on:
       - redis
+      - ollama
     restart: always
+
+volumes:
+  ollama_data:
