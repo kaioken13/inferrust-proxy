@@ -128,3 +128,119 @@ async fn test_rate_limiter_enforces_limit_and_isolates_ips() {
         "User B was unfairly rate limited!"
     );
 }
+
+// 3. TEST: Malicious Header Injection & Safe Fallback
+#[tokio::test]
+async fn test_rate_limiter_malicious_ip_header_fallback() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(matchers::method("POST"))
+        .and(matchers::path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "cmpl-mock",
+            "choices": [{"message": {"content": "Sanitized successfully"}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let app = common::setup_test_app(mock_server.uri());
+
+    let payload = json!({
+        "model": "llama2",
+        "messages": [{"role": "user", "content": "Security test"}]
+    });
+
+    let mut request = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header(
+            "x-forwarded-for",
+            "malicious_input; DROP TABLE users; 127.0.0.1",
+        )
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    request
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(SocketAddr::from((
+            [127, 0, 0, 1],
+            8080,
+        ))));
+
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "Malicious header caused an unexpected failure instead of graceful fallback"
+    );
+}
+
+// 4. TEST: IP Isolation via X-Forwarded-For Header (Requires Local Redis)
+// Run with: cargo test -- --ignored test_rate_limiter_isolates_forwarded_ips
+#[tokio::test]
+#[ignore = "Requires local Redis instance running on port 6379"]
+async fn test_rate_limiter_isolates_forwarded_ips() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "choices": [{"message": {"content": "Forwarded IP test"}}]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let app = common::setup_test_app_with_redis(mock_server.uri().to_string());
+    let payload = json!({"model": "llama2", "messages": []});
+
+    // O proxy de borda sempre tem o mesmo socket address local
+    let edge_proxy_addr = SocketAddr::from(([10, 0, 0, 1], 8080));
+    let mut hits = 0;
+
+    // Cliente 1 bate repetidamente via X-Forwarded-For
+    loop {
+        let mut req = Request::builder()
+            .uri("/v1/chat/completions")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("x-forwarded-for", "203.0.113.195, 10.0.0.1")
+            .body(Body::from(payload.to_string()))
+            .unwrap();
+
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(edge_proxy_addr));
+
+        let res = app.clone().oneshot(req).await.unwrap();
+
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            break;
+        }
+
+        assert_eq!(res.status(), StatusCode::OK);
+        hits += 1;
+        if hits > 200 {
+            panic!("Forwarded client rate limit was never reached!");
+        }
+    }
+
+    // Cliente 2 passa pelo MESMO proxy de borda (mesmo ConnectInfo), mas com IP de origem diferente
+    let mut req_client_2 = Request::builder()
+        .uri("/v1/chat/completions")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "198.51.100.44, 10.0.0.1")
+        .body(Body::from(payload.to_string()))
+        .unwrap();
+
+    req_client_2
+        .extensions_mut()
+        .insert(axum::extract::ConnectInfo(edge_proxy_addr));
+
+    let res_client_2 = app.clone().oneshot(req_client_2).await.unwrap();
+
+    assert_eq!(
+        res_client_2.status(),
+        StatusCode::OK,
+        "Client 2 was blocked by Client 1's quota sharing the same edge proxy!"
+    );
+}
