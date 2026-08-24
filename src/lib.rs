@@ -22,24 +22,9 @@ pub struct AppState {
     pub redis_client: Option<redis::Client>,
 }
 
-pub async fn app(state: Arc<AppState>) -> axum::Router {
-    let rate_limit_layer = RateLimitLayer {
-        redis_client: state.redis_client.clone(),
-        limit: 100, // 100 req/min
-    };
-
-    axum::Router::new()
-        .route(
-            "/v1/chat/completions",
-            axum::routing::post(chat_completions_handler),
-        )
-        .layer(rate_limit_layer) //
-        .with_state(state)
-}
-
 pub fn create_app(state: Arc<AppState>) -> Router {
     // Configure the Rate Limit middleware using the Redis client from the state
-    let rate_limit_layer = crate::middleware::RateLimitLayer {
+    let rate_limit_layer = RateLimitLayer {
         redis_client: state.redis_client.clone(),
         limit: 100, // 100 req/min per IP
     };
