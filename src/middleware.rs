@@ -11,6 +11,7 @@ use tower::{Layer, Service};
 pub struct RateLimitLayer {
     pub redis_client: Option<redis::Client>, // Optional Redis client for local mode support
     pub limit: i32,
+    pub behind_proxy: bool,
 }
 
 impl<S> Layer<S> for RateLimitLayer {
@@ -21,6 +22,7 @@ impl<S> Layer<S> for RateLimitLayer {
             inner,
             redis_client: self.redis_client.clone(),
             limit: self.limit,
+            behind_proxy: self.behind_proxy,
         }
     }
 }
@@ -30,6 +32,7 @@ pub struct RateLimitMiddleware<S> {
     inner: S,
     redis_client: Option<redis::Client>,
     limit: i32,
+    behind_proxy: bool,
 }
 
 impl<S> Service<Request> for RateLimitMiddleware<S>
@@ -54,11 +57,29 @@ where
         let limit = self.limit;
 
         // Extract client IP to isolate rate-limiting per user and prevent global denial-of-service
-        let client_ip = req
-            .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|addr| addr.0.ip().to_string())
-            .unwrap_or_else(|| "anonymous".to_string());
+        let client_ip = if self.behind_proxy {
+            req.headers()
+                .get("x-forwarded-for")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .and_then(|ip_str| ip_str.trim().parse::<std::net::IpAddr>().ok())
+                .map(|ip| ip.to_string())
+                .or_else(|| {
+                    req.headers()
+                        .get("cf-connecting-ip")
+                        .and_then(|h| h.to_str().ok())
+                        .and_then(|ip_str| ip_str.trim().parse::<std::net::IpAddr>().ok())
+                        .map(|ip| ip.to_string())
+                })
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|addr| addr.0.ip().to_string())
+                .unwrap_or_else(|| "anonymous".to_string())
+        });
 
         Box::pin(async move {
             let client = match client_opt {

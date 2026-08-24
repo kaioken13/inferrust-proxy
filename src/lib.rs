@@ -24,9 +24,14 @@ pub struct AppState {
 
 pub fn create_app(state: Arc<AppState>) -> Router {
     // Configure the Rate Limit middleware using the Redis client from the state
+    let behind_proxy = std::env::var("BEHIND_PROXY")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     let rate_limit_layer = RateLimitLayer {
         redis_client: state.redis_client.clone(),
-        limit: 100, // 100 req/min per IP
+        limit: 100,
+        behind_proxy,
     };
 
     Router::new()
