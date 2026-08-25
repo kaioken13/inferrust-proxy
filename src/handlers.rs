@@ -83,20 +83,37 @@ pub async fn chat_completions_handler(
 
     tracing::info!(key = %cache_key, "Cache MISS. Processing request...");
 
-    // Extract full_text for the Tokenizer
-    let full_text = payload["messages"]
-        .as_array()
-        .unwrap_or(&vec![])
-        .iter()
-        .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Zero-heap-allocation, accurate ChatML token estimation
+    let prompt_tokens = if let Some(messages) = payload["messages"].as_array() {
+        let mut total_tokens = 0;
 
-    let prompt_tokens = state
-        .tokenizer
-        .encode(full_text.to_string(), false)
-        .map(|encoded| encoded.get_ids().len())
-        .unwrap_or(0);
+        for message in messages {
+            // Every message follows <|im_start|>{role/name}\n{content}<|im_end|>\n
+            // Base metadata framing overhead per message is ~3 tokens
+            total_tokens += 3;
+
+            // Encode content directly from slice &str (zero string clones/allocations)
+            if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
+                if let Ok(encoded) = state.tokenizer.encode(content, false) {
+                    total_tokens += encoded.get_ids().len();
+                }
+            }
+
+            // Optional 'name' field tokens and framing if specified
+            if let Some(name) = message.get("name").and_then(|n| n.as_str()) {
+                if let Ok(encoded) = state.tokenizer.encode(name, false) {
+                    total_tokens += encoded.get_ids().len();
+                    total_tokens += 1; // Additional token overhead for the name field
+                }
+            }
+        }
+
+        // Add 3 tokens for the assistant priming prompt: <|im_start|>assistant\n
+        total_tokens += 3;
+        total_tokens
+    } else {
+        0
+    };
 
     // 5. Prepare Idempotency, Dynamic p95 Timeout, and Load Balancing
     let idempotency_key = uuid::Uuid::new_v4().to_string();
