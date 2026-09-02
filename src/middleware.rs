@@ -10,7 +10,7 @@ use tower::{Layer, Service};
 #[derive(Clone)]
 pub struct RateLimitLayer {
     pub redis_client: Option<redis::Client>, // Optional Redis client for local mode support
-    pub limit: i32,
+    pub limit: usize,
     pub behind_proxy: bool,
 }
 
@@ -31,7 +31,7 @@ impl<S> Layer<S> for RateLimitLayer {
 pub struct RateLimitMiddleware<S> {
     inner: S,
     redis_client: Option<redis::Client>,
-    limit: i32,
+    limit: usize,
     behind_proxy: bool,
 }
 
@@ -110,7 +110,7 @@ where
                 .await;
 
             let count = match result {
-                Ok((val, _)) => val,
+                Ok((val, _)) => val as usize,
                 Err(e) => {
                     tracing::error!(
                         "Failed to execute atomic rate limit in Redis: {}. Failing open.",

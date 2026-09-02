@@ -23,6 +23,8 @@ services:
       - RUST_LOG=info
       - REDIS_URL=redis://redis:6379
       - BACKEND_URLS=http://ollama:11434
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-100000}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-100000}
     depends_on:
       - redis
       - ollama
