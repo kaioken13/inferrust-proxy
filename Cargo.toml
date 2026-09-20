@@ -37,6 +37,9 @@ redis = { version = "0.26", features = ["tokio-comp"] }
 # Server Sent Events
 tokio-stream = "0.1"
 
+# Observability
+prometheus = "0.13"
+
 [dev-dependencies]
 wiremock = "0.6"
 http-body-util = "0.1"

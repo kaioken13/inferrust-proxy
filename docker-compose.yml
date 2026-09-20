@@ -5,14 +5,17 @@ services:
     ports:
       - "6379:6379"
     restart: always
+    networks:
+      - ml-infra-net
 
   ollama:
     image: ollama/ollama:latest
     container_name: inferrust-ollama
-    # Removemos o "ports" daqui para evitar conflito na porta 11434 do host!
     volumes:
       - ollama_data:/root/.ollama
     restart: always
+    networks:
+      - ml-infra-net
 
   proxy:
     build: .
@@ -25,10 +28,52 @@ services:
       - BACKEND_URLS=http://ollama:11434
       - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-100000}
       - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-100000}
+      - VECTORDB_GRPC_ENDPOINT=http://vectordb-core:50051
     depends_on:
       - redis
       - ollama
     restart: always
+    networks:
+      - ml-infra-net
+
+  # --- Monitoramento ---
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: prometheus
+    restart: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - ml-infra-net
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    restart: always
+    ports:
+      - "3001:3000" # Mapeado para 3001 no host para não conflitar com a porta 3000 do proxy
+    volumes:
+      - grafana_data:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    networks:
+      - ml-infra-net
 
 volumes:
   ollama_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  ml-infra-net:
+    external: true

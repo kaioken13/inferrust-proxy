@@ -1,4 +1,5 @@
 // src/main.rs
+use axum::routing::get;
 use inferrust_proxy::{create_app, AppState};
 use moka::future::Cache;
 use reqwest::Client;
@@ -58,7 +59,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         redis_client: Some(redis_client),
     });
 
-    let app = create_app(state);
+    let app = create_app(state).route(
+        "/metrics",
+        get(|| async {
+            // Se já usa a crate prometheus:
+            use prometheus::Encoder;
+            let encoder = prometheus::TextEncoder::new();
+            let metric_families = prometheus::gather();
+            let mut buffer = vec![];
+            let _ = encoder.encode(&metric_families, &mut buffer);
+            String::from_utf8(buffer).unwrap_or_default()
+        }),
+    );
 
     // Allows running on 0.0.0.0 in production (required for Docker) and reading the Env port
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
