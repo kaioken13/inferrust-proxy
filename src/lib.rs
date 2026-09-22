@@ -3,12 +3,17 @@ pub mod cache;
 pub mod handlers;
 
 pub mod utils;
+pub mod vectordb_client;
 
 mod middleware;
-use axum::Router;
+
+use crate::handlers::search_vectors;
+use crate::vectordb_client::VectorServiceClient;
+use axum::{routing::post, Router};
 use middleware::RateLimitLayer;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
+use tonic::transport::Channel;
 
 use handlers::{chat_completions_handler, health_handler};
 
@@ -20,6 +25,7 @@ pub struct AppState {
     pub tokenizer: Tokenizer,
     pub latencies: std::sync::RwLock<std::collections::VecDeque<u64>>,
     pub redis_client: Option<redis::Client>,
+    pub vectordb_client: VectorServiceClient<Channel>,
 }
 
 pub fn create_app(state: Arc<AppState>) -> Router {
@@ -49,6 +55,7 @@ pub fn create_app(state: Arc<AppState>) -> Router {
             "/v1/chat/completions",
             axum::routing::post(chat_completions_handler),
         )
+        .route("/v1/vectors/search", post(search_vectors))
         .layer(rate_limit_layer)
         .with_state(state)
 }

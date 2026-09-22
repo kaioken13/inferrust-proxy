@@ -43,7 +43,7 @@ async fn test_proxy_forwards_payload_to_backend() {
 
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/v1/chat/completions"))
-        .and(wiremock::matchers::body_json(&json!({
+        .and(wiremock::matchers::body_json(json!({
             "model": "llama2",
             "messages": [{"role": "user", "content": "Hello"}]
         })))

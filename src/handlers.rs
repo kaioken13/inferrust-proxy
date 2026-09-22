@@ -1,10 +1,9 @@
 // src/handlers.rs
-use crate::AppState;
-use axum::response::IntoResponse;
-use axum::Json;
-
-use reqwest::StatusCode;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+use crate::{vectordb_client::SearchRequest, AppState};
 
 use crate::cache::generate_cache_key;
 use futures::StreamExt;
@@ -21,6 +20,53 @@ struct CacheEntry {
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+#[derive(Deserialize)]
+pub struct VectorSearchPayload {
+    pub vector: Vec<f32>,
+    pub k: u32,
+}
+
+#[derive(Serialize)]
+pub struct VectorSearchResult {
+    pub matches: Vec<Match>,
+}
+
+#[derive(Serialize)]
+pub struct Match {
+    pub id: u64,
+    pub distance: f32,
+}
+
+pub async fn search_vectors(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<VectorSearchPayload>,
+) -> Result<Json<VectorSearchResult>, StatusCode> {
+    let mut client = state.vectordb_client.clone();
+
+    let request = tonic::Request::new(SearchRequest {
+        vector: payload.vector,
+        k: payload.k,
+    });
+
+    match client.search(request).await {
+        Ok(response) => {
+            let inner = response.into_inner();
+            let matches = inner
+                .node_ids
+                .into_iter()
+                .zip(inner.distances)
+                .map(|(id, distance)| Match { id, distance })
+                .collect();
+
+            Ok(Json(VectorSearchResult { matches }))
+        }
+        Err(status) => {
+            tracing::error!("VectorDB gRPC search failed: {:?}", status);
+            Err(StatusCode::BAD_GATEWAY)
+        }
+    }
 }
 
 pub async fn health_handler() -> impl IntoResponse {

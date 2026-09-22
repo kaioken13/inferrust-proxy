@@ -1,11 +1,13 @@
 // tests/common/mod.rs
 #![allow(dead_code)]
 
+use inferrust_proxy::vectordb_client::VectorServiceClient;
 use inferrust_proxy::{create_app, AppState};
 use moka::future::Cache;
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
+use tonic::transport::Endpoint;
 
 /// Creates a test instance with a specific Cache TTL (Time to Live)
 pub fn setup_test_app_with_ttl(backend_url: String, ttl_secs: u64) -> axum::Router {
@@ -18,6 +20,10 @@ pub fn setup_test_app_with_ttl(backend_url: String, ttl_secs: u64) -> axum::Rout
         .time_to_live(Duration::from_secs(ttl_secs))
         .build();
 
+    let dummy_endpoint = Endpoint::from_static("http://[::1]:50051");
+    let dummy_channel = dummy_endpoint.connect_lazy();
+    let vectordb_client = VectorServiceClient::new(dummy_channel);
+
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_urls: vec![backend_url],
@@ -26,6 +32,7 @@ pub fn setup_test_app_with_ttl(backend_url: String, ttl_secs: u64) -> axum::Rout
         next_replica: std::sync::atomic::AtomicUsize::new(0),
         latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
         redis_client: None, // Redis mocked out for these tests
+        vectordb_client,
     });
 
     create_app(state)
@@ -43,6 +50,10 @@ pub fn setup_test_app_with_redis(backend_url: String) -> axum::Router {
 
     let cache = Cache::builder().max_capacity(100).build();
 
+    let dummy_endpoint = Endpoint::from_static("http://[::1]:50051");
+    let dummy_channel = dummy_endpoint.connect_lazy();
+    let vectordb_client = VectorServiceClient::new(dummy_channel);
+
     let state = Arc::new(AppState {
         http_client: Client::new(),
         backend_urls: vec![backend_url],
@@ -50,6 +61,7 @@ pub fn setup_test_app_with_redis(backend_url: String) -> axum::Router {
         tokenizer,
         next_replica: std::sync::atomic::AtomicUsize::new(0),
         latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
+        vectordb_client,
         // ATENÇÃO: Aqui nós ativamos o Redis real para o teste!
         redis_client: Some(redis::Client::open("redis://127.0.0.1:6379").unwrap()),
     });

@@ -11,6 +11,14 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
 RUN rm -rf src
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY proto ./proto
+COPY build.rs ./
 # Copy real source code and tokenizer configuration
 COPY src ./src
 COPY tokenizer.json ./
