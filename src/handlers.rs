@@ -45,28 +45,32 @@ pub async fn search_vectors(
 ) -> Result<Json<VectorSearchResult>, StatusCode> {
     let mut client = state.vectordb_client.clone();
 
+    // 1. Constructs the request aligned with the updated proto (query_vector)
     let request = tonic::Request::new(SearchRequest {
-        vector: payload.vector,
+        query_vector: payload.vector,
         k: payload.k,
     });
 
-    match client.search(request).await {
-        Ok(response) => {
-            let inner = response.into_inner();
-            let matches = inner
-                .node_ids
-                .into_iter()
-                .zip(inner.distances)
-                .map(|(id, distance)| Match { id, distance })
-                .collect();
-
-            Ok(Json(VectorSearchResult { matches }))
-        }
+    // 2. Call the search_nearest RPC exposed by vectordb-core
+    let response = match client.search_nearest(request).await {
+        Ok(res) => res.into_inner(),
         Err(status) => {
             tracing::error!("VectorDB gRPC search failed: {:?}", status);
-            Err(StatusCode::BAD_GATEWAY)
+            return Err(StatusCode::BAD_GATEWAY);
         }
-    }
+    };
+
+    // 3. Maps directly to the repeated SearchMatch matches
+    let matches = response
+        .matches
+        .into_iter()
+        .map(|m| Match {
+            id: m.id,
+            distance: m.distance,
+        })
+        .collect();
+
+    Ok(Json(VectorSearchResult { matches }))
 }
 
 pub async fn health_handler() -> impl IntoResponse {

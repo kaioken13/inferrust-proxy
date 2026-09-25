@@ -3,25 +3,44 @@ syntax = "proto3";
 package vectordb;
 
 service VectorService {
-  rpc Search (SearchRequest) returns (SearchResponse);
-  rpc Insert (InsertRequest) returns (InsertResponse);
+  rpc InsertVector (InsertRequest) returns (InsertResponse);
+  rpc BatchInsert (BatchInsertRequest) returns (BatchInsertResponse);
+  rpc SearchNearest (SearchRequest) returns (SearchResponse);
 }
 
-message SearchRequest {
-  repeated float vector = 1;
-  uint32 k = 2;
-}
-
-message SearchResponse {
-  repeated uint64 node_ids = 1;
-  repeated float distances = 2;
+message VectorItem {
+  uint64 id = 1;
+  repeated float values = 2;
 }
 
 message InsertRequest {
-  uint64 id = 1;
-  repeated float vector = 2;
+  VectorItem item = 1;
 }
 
 message InsertResponse {
   bool success = 1;
+  string message = 2;
+}
+
+message BatchInsertRequest {
+  repeated VectorItem items = 1;
+}
+
+message BatchInsertResponse {
+  uint32 inserted_count = 1;
+  bool success = 2;
+}
+
+message SearchRequest {
+  repeated float query_vector = 1;
+  uint32 k = 2;
+}
+
+message SearchMatch {
+  uint64 id = 1;
+  float distance = 2;
+}
+
+message SearchResponse {
+  repeated SearchMatch matches = 1;
 }
