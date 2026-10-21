@@ -26,22 +26,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenizer =
         tokenizers::Tokenizer::from_file("tokenizer.json").expect("Failed to load tokenizer.json");
 
-    // Reqwest TCP/HTTP Connection Pool Optimization to avoid repeated TLS handshakes
+    // Reqwest TCP/HTTP Connection Pool Optimization
     let http_client = Client::builder()
-        .pool_max_idle_per_host(50) // Maintains warm connections to the inference backend
+        .pool_max_idle_per_host(50)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(60))
-        // TODO: Mitigate Latency Kills
-        .timeout(Duration::from_secs(300)) // Maximum time for slow LLMs to respond
+        .timeout(Duration::from_secs(300))
         .build()
         .expect("Failed to build HTTP Client");
 
-    // Reads the Redis URL from the environment or uses the Docker service name as the default
     let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://redis:6379".to_string());
-
     let redis_client = redis::Client::open(redis_url).expect("Failed to initialize Redis client");
 
-    // Keep reading from the backend via env, as you've already correctly implemented:
     let backend_urls_env = std::env::var("BACKEND_URLS")
         .unwrap_or_else(|_| "http://host.docker.internal:11434".to_string());
 
@@ -58,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await
         .expect("Failed to connect to VectorDB gRPC service");
 
-    let state = std::sync::Arc::new(crate::AppState {
+    let state = std::sync::Arc::new(AppState {
         http_client,
         backend_urls,
         next_replica: std::sync::atomic::AtomicUsize::new(0),
@@ -72,7 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = create_app(state).route(
         "/metrics",
         get(|| async {
-            // Se já usa a crate prometheus:
             use prometheus::Encoder;
             let encoder = prometheus::TextEncoder::new();
             let metric_families = prometheus::gather();
@@ -81,8 +76,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             String::from_utf8(buffer).unwrap_or_default()
         }),
     );
-
-    // Allows running on 0.0.0.0 in production (required for Docker) and reading the Env port
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr: SocketAddr = format!("{}:{}", host, port)

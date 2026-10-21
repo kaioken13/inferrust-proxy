@@ -5,12 +5,16 @@ use axum::{
     http::{Response, StatusCode},
     response::IntoResponse,
 };
+use std::sync::Arc;
 use tower::{Layer, Service};
+
+use crate::rate_limiter::RateLimiter;
 
 #[derive(Clone)]
 pub struct RateLimitLayer {
-    pub redis_client: Option<redis::Client>, // Optional Redis client for local mode support
+    pub limiter: Option<Arc<dyn RateLimiter>>,
     pub limit: usize,
+    pub window_secs: u64,
     pub behind_proxy: bool,
 }
 
@@ -20,8 +24,9 @@ impl<S> Layer<S> for RateLimitLayer {
     fn layer(&self, inner: S) -> Self::Service {
         RateLimitMiddleware {
             inner,
-            redis_client: self.redis_client.clone(),
+            limiter: self.limiter.clone(),
             limit: self.limit,
+            window_secs: self.window_secs,
             behind_proxy: self.behind_proxy,
         }
     }
@@ -30,8 +35,9 @@ impl<S> Layer<S> for RateLimitLayer {
 #[derive(Clone)]
 pub struct RateLimitMiddleware<S> {
     inner: S,
-    redis_client: Option<redis::Client>,
+    limiter: Option<Arc<dyn RateLimiter>>,
     limit: usize,
+    window_secs: u64,
     behind_proxy: bool,
 }
 
@@ -53,10 +59,11 @@ where
 
     fn call(&mut self, req: Request) -> Self::Future {
         let mut inner = self.inner.clone();
-        let client_opt = self.redis_client.clone();
+        let limiter_opt = self.limiter.clone();
         let limit = self.limit;
+        let window_secs = self.window_secs;
 
-        // Extract client IP to isolate rate-limiting per user and prevent global denial-of-service
+        // Extrai o IP do cliente respeitando proxies upstream se configurado
         let client_ip = if self.behind_proxy {
             req.headers()
                 .get("x-forwarded-for")
@@ -82,46 +89,18 @@ where
         });
 
         Box::pin(async move {
-            let client = match client_opt {
-                Some(c) => c,
-                None => return inner.call(req).await,
-            };
-
-            let mut conn = match client.get_multiplexed_async_connection().await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::error!(
-                        "Redis connection failed (Fail-Open): {}. Passing through.",
-                        e
-                    );
-                    return inner.call(req).await;
+            if let Some(limiter) = limiter_opt {
+                match limiter.check(&client_ip, limit, window_secs).await {
+                    Ok(allowed) => {
+                        if !allowed {
+                            return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
+                        }
+                    }
+                    Err(e) => {
+                        // Fail-open: falhas no rate limiter não derrubam o tráfego do gateway
+                        tracing::error!("Rate limiter error: {}. Failing open.", e);
+                    }
                 }
-            };
-
-            let key = format!("rate_limit:{}", client_ip);
-
-            // Atomic approach: Use a transaction to ensure INCR and EXPIRE are linked
-            // or simply check if the key exists to set the TTL.
-            let result: Result<(i32, ()), redis::RedisError> = redis::pipe()
-                .atomic()
-                .incr(&key, 1)
-                .expire(&key, 60)
-                .query_async(&mut conn)
-                .await;
-
-            let count = match result {
-                Ok((val, _)) => val as usize,
-                Err(e) => {
-                    tracing::error!(
-                        "Failed to execute atomic rate limit in Redis: {}. Failing open.",
-                        e
-                    );
-                    return inner.call(req).await;
-                }
-            };
-
-            if count > limit {
-                return Ok(StatusCode::TOO_MANY_REQUESTS.into_response());
             }
 
             inner.call(req).await

@@ -43,10 +43,20 @@ prometheus = "0.13"
 tonic = "0.12"
 prost = "0.13"
 
+dashmap = "6.0"
+async-trait = "0.1"
+thiserror = "1.0"
+
 [dev-dependencies]
 wiremock = "0.6"
 http-body-util = "0.1"
 tower = { version = "0.4", features = ["util"] }
+criterion = { version = "0.5", features = ["async_tokio"] }
+tokio = { version = "1", features = ["full"] }
 
 [build-dependencies]
 tonic-build = "0.12"
+
+[[bench]]
+name = "rate_limiter"
+harness = false
