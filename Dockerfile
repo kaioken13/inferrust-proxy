@@ -6,10 +6,14 @@ WORKDIR /app
 # Copy Cargo manifests for dependency caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy project to build and cache dependencies
-RUN mkdir src && echo "fn main() {}" > src/main.rs
+# Create dummy files to build and cache dependencies
+RUN mkdir -p src benches && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > benches/rate_limiter.rs
+
 RUN cargo build --release
-RUN rm -rf src
+
+RUN rm -rf src benches
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
@@ -21,6 +25,7 @@ COPY proto ./proto
 COPY build.rs ./
 # Copy real source code and tokenizer configuration
 COPY src ./src
+COPY benches ./benches
 COPY tokenizer.json ./
 
 # Compile the actual project in release mode
