@@ -32,7 +32,7 @@ pub fn setup_test_app_with_ttl(backend_url: String, ttl_secs: u64) -> axum::Rout
         next_replica: std::sync::atomic::AtomicUsize::new(0),
         latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
         redis_client: None, // Redis mocked out for these tests
-        vectordb_client,
+        vectordb_client: Some(vectordb_client),
     });
 
     create_app(state)
@@ -61,7 +61,7 @@ pub fn setup_test_app_with_redis(backend_url: String) -> axum::Router {
         tokenizer,
         next_replica: std::sync::atomic::AtomicUsize::new(0),
         latencies: std::sync::RwLock::new(std::collections::VecDeque::with_capacity(100)),
-        vectordb_client,
+        vectordb_client: Some(vectordb_client),
         // ATENÇÃO: Aqui nós ativamos o Redis real para o teste!
         redis_client: Some(redis::Client::open("redis://127.0.0.1:6379").unwrap()),
     });
