@@ -12,7 +12,6 @@ use axum::{
 };
 use std::sync::Arc;
 use tokenizers::Tokenizer;
-use tonic::transport::Channel;
 
 use crate::handlers::{chat_completions_handler, health_handler, search_vectors};
 use crate::middleware::RateLimitLayer;
@@ -28,7 +27,7 @@ pub struct AppState {
     pub tokenizer: Tokenizer,
     pub latencies: std::sync::RwLock<std::collections::VecDeque<u64>>,
     pub redis_client: Option<redis::Client>,
-    pub vectordb_client: VectorServiceClient<Channel>,
+    pub vectordb_client: Option<VectorServiceClient<tonic::transport::Channel>>,
 }
 
 pub fn create_app(state: Arc<AppState>) -> Router {

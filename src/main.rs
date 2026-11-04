@@ -46,13 +46,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.trim().trim_end_matches('/').to_string())
         .collect();
 
-    let vectordb_endpoint = std::env::var("VECTORDB_GRPC_ENDPOINT")
-        .unwrap_or_else(|_| "http://vectordb-core:50051".to_string());
-
-    tracing::info!("Connecting to VectorDB at {}", vectordb_endpoint);
-    let vectordb_client = VectorServiceClient::connect(vectordb_endpoint)
-        .await
-        .expect("Failed to connect to VectorDB gRPC service");
+    let vectordb_client = match std::env::var("VECTORDB_GRPC_ENDPOINT") {
+        Ok(endpoint) if !endpoint.trim().is_empty() => {
+            tracing::info!("Connecting to VectorDB at {}", endpoint);
+            let channel = tonic::transport::Endpoint::from_shared(endpoint)
+                .ok()
+                .map(|ep| ep.connect_lazy());
+            channel.map(VectorServiceClient::new)
+        }
+        _ => {
+            tracing::info!("VectorDB integration disabled. Running in standalone proxy mode.");
+            None
+        }
+    };
 
     let state = std::sync::Arc::new(AppState {
         http_client,

@@ -39,11 +39,26 @@ pub struct Match {
     pub distance: f32,
 }
 
+pub async fn health_handler() -> impl IntoResponse {
+    let health_status = serde_json::json!({
+        "status": "ok",
+        "message": "inferrust-proxy",
+    });
+    (StatusCode::OK, Json(health_status))
+}
+
 pub async fn search_vectors(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<VectorSearchPayload>,
 ) -> Result<Json<VectorSearchResult>, StatusCode> {
-    let mut client = state.vectordb_client.clone();
+    // 0. Extrai o client do Option; devolve 503 se o VectorDB estiver desligado
+    let mut client = match state.vectordb_client.clone() {
+        Some(client) => client,
+        None => {
+            tracing::warn!("Vector search requested but VectorDB integration is disabled");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
 
     // 1. Constructs the request aligned with the updated proto (query_vector)
     let request = tonic::Request::new(SearchRequest {
@@ -71,14 +86,6 @@ pub async fn search_vectors(
         .collect();
 
     Ok(Json(VectorSearchResult { matches }))
-}
-
-pub async fn health_handler() -> impl IntoResponse {
-    let health_status = serde_json::json!({
-        "status": "ok",
-        "message": "inferrust-proxy",
-    });
-    (StatusCode::OK, Json(health_status))
 }
 
 pub async fn chat_completions_handler(
