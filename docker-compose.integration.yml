@@ -1,0 +1,45 @@
+name: inferrust-infra
+
+networks:
+  ml-infra-net:
+    driver: bridge
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ml-infra-net
+
+  disputeguard-api:
+    build:
+      context: ../disputeguard
+      dockerfile: Dockerfile
+    container_name: disputeguard-api
+    ports:
+      - "8000:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+    networks:
+      - ml-infra-net
+    depends_on:
+      - redis
+
+  inferrust-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inferrust-proxy
+    ports:
+      - "3000:3000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - RATE_LIMIT_BURST=100
+      - BEHIND_PROXY=false
+    networks:
+      - ml-infra-net
+    depends_on:
+      - redis
+      - disputeguard-api
