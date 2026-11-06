@@ -5,6 +5,7 @@ pub mod middleware;
 pub mod rate_limiter;
 pub mod utils;
 pub mod vectordb_client;
+use crate::handlers::forward_to_disputeguard;
 
 use axum::{
     routing::{get, post},
@@ -65,6 +66,7 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/health", get(health_handler))
         .route("/v1/chat/completions", post(chat_completions_handler))
         .route("/v1/vectors/search", post(search_vectors))
+        .route("/v1/disputes/resolve", post(forward_to_disputeguard))
         .layer(rate_limit_layer)
         .with_state(state)
 }

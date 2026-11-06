@@ -1,5 +1,8 @@
 // src/handlers.rs
+use axum::http::header;
+use axum::{extract::Request, response::Response};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -45,6 +48,84 @@ pub async fn health_handler() -> impl IntoResponse {
         "message": "inferrust-proxy",
     });
     (StatusCode::OK, Json(health_status))
+}
+
+pub async fn forward_to_disputeguard(
+    State(state): State<Arc<AppState>>,
+    req: Request,
+) -> Result<Response, StatusCode> {
+    let (parts, body) = req.into_parts();
+
+    // 1. Extração da Chave de Idempotência
+    let idempotency_key = parts
+        .headers
+        .get("idempotency-key")
+        .and_then(|val| val.to_str().ok())
+        .map(|s| format!("idempotency:{}", s));
+
+    // 2. Consulta no Redis se a chave foi fornecida
+    if let (Some(ref key), Some(ref client)) = (&idempotency_key, &state.redis_client) {
+        if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+            let cached: redis::RedisResult<Option<String>> = con.get(key).await;
+            if let Ok(Some(cached_json)) = cached {
+                tracing::info!("Idempotency HIT for key: {}", key);
+                return Ok((
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "application/json"),
+                        (header::HeaderName::from_static("x-cache"), "HIT"),
+                    ],
+                    cached_json,
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    // 3. Lê o corpo da requisição para encaminhar ao DisputeGuard
+    let bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let target_url = "http://disputeguard-api:8000/v1/disputes/resolve";
+    let mut upstream_req = state.http_client.post(target_url).body(bytes);
+
+    if let Some(content_type) = parts.headers.get(header::CONTENT_TYPE) {
+        upstream_req = upstream_req.header(header::CONTENT_TYPE, content_type);
+    }
+
+    // 4. Executa a requisição upstream
+    let upstream_res = upstream_req
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    let status = upstream_res.status();
+    let res_bytes = upstream_res
+        .bytes()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+
+    // 5. Se foi sucesso e há chave de idempotência, persiste no Redis (TTL = 86400s / 24h)
+    if status.is_success() {
+        if let (Some(ref key), Some(ref client)) = (&idempotency_key, &state.redis_client) {
+            if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+                let body_str = String::from_utf8_lossy(&res_bytes).to_string();
+                let _: redis::RedisResult<()> = con.set_ex(key, body_str, 86400).await;
+                tracing::info!("Idempotency SET for key: {}", key);
+            }
+        }
+    }
+
+    Ok((
+        status,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::HeaderName::from_static("x-cache"), "MISS"),
+        ],
+        res_bytes,
+    )
+        .into_response())
 }
 
 pub async fn search_vectors(
