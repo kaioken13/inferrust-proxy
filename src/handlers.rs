@@ -2,6 +2,7 @@
 use axum::http::header;
 use axum::{extract::Request, response::Response};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use metrics::histogram;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -371,24 +372,45 @@ pub async fn chat_completions_handler(
         let state_clone = state.clone();
         let cache_key_clone = cache_key.clone();
         let prompt_tokens_clone = prompt_tokens;
+        let req_start = start;
 
-        // Background worker: intercept chunks and save to cache when done
+        // Background worker: mede TTFT/ITL, repassa chunks para o cliente e salva no cache L1
         tokio::spawn(async move {
             let mut cache_buffer = Vec::new();
+            let mut is_first_chunk = true;
+            let mut last_chunk_time = std::time::Instant::now();
+
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
                     Ok(chunk) => {
+                        let now = std::time::Instant::now();
+
+                        if is_first_chunk {
+                            // TTFT real: intervalo desde a chegada do request no proxy até o 1º chunk emitido
+                            let ttft = req_start.elapsed().as_secs_f64();
+                            histogram!("llm_time_to_first_token_seconds").record(ttft);
+                            is_first_chunk = false;
+                        } else {
+                            // ITL real: latência decorrida entre chunks sucessivos de decode
+                            let itl = now.duration_since(last_chunk_time).as_secs_f64();
+                            histogram!("llm_inter_token_latency_seconds").record(itl);
+                        }
+                        last_chunk_time = now;
+
                         cache_buffer.extend_from_slice(&chunk);
                         if tx.send(Ok(chunk)).await.is_err() {
                             break;
                         }
                     }
                     Err(e) => {
+                        tracing::error!("Stream error while reading chunk: {}", e);
                         let _ = tx.send(Err(e)).await;
                         break;
                     }
                 }
             }
+
+            // Persistência no cache L1 Moka (apenas para status 2xx)
             if !cache_buffer.is_empty() && status.is_success() {
                 if let Ok(full_sse_text) = String::from_utf8(cache_buffer) {
                     let cache_entry = CacheEntry {
