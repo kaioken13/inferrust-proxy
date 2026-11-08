@@ -16,34 +16,59 @@ A lightweight reverse proxy and LLM inference sidecar written in **Rust** using 
 
 ## Architecture overview
 
-```
-+-------------------------------------------------------------------------------+
-|                                INFERRUST-PROXY                                |
-|                                                                               |
-|                   Incoming Request (Port 3000)                                |
-|                                 |                                             |
-|                     [ Redis Rate Limiter ]                                    |
-|                     (Fallback: Fail-Open)                                     |
-|                                 |                                             |
-|            +--------------------+--------------------+                        |
-|            |                                         |                        |
-|   POST /v1/chat/completions                 POST /v1/disputes/resolve         |
-|            |                                         |                        |
-|     [ L1 Cache: Moka ]                      [ L2 Redis Idempotency ]          |
-|      (Prompt/Body Key)                       (Key: Idempotency-Key)           |
-|      /              \                                |                        |
-|   (HIT)            (MISS)                     +------+------+                 |
-|  Return           Forward                     |             |                 |
-|  Cached         to Hedged                   (HIT)         (MISS)              |
-|  Stream          Backends                  Return        Forward              |
-|                     |                      Cached       to Upstream           |
-|            +--------+--------+             Verdict     (DisputeGuard)         |
-|            |                 |                            |                   |
-|       Primary           Speculative                  Persist to Redis         |
-|       Backend          p95 Hedge Node                 (TTL: 24 Hours)         |
-|     (e.g., vLLM/       (e.g., Replica)                                        |
-|       Ollama)                                                                 |
-+-------------------------------------------------------------------------------+
+```mermaid
+flowchart TD
+    Client["Client / application"] -->|"HTTP request, port 3000"| RL
+
+    subgraph edge ["inferrust-proxy :3000"]
+        RL{"Redis rate limiter<br/>fixed 60 s window, fail-open"}
+
+        subgraph chat ["POST /v1/chat/completions"]
+            L1["L1 cache: Moka<br/>prompt / body key"]
+            HitChat["Return cached response or stream"]
+            Hedge["Hedged request engine<br/>p95 over the last 100 samples"]
+        end
+
+        subgraph disputes ["POST /v1/disputes/resolve"]
+            L2["L2 idempotency<br/>key: Idempotency-Key"]
+            HitDisp["Return stored verdict<br/>x-cache: HIT"]
+        end
+    end
+
+    subgraph upstream ["Upstream services"]
+        Primary["Primary backend<br/>vLLM / Ollama"]
+        Replica["Speculative replica"]
+        DG["DisputeGuard :8000<br/>internal network"]
+    end
+
+    Redis[("Redis :6379<br/>rate limits and idempotency")]
+
+    RL -->|"chat"| L1
+    RL -->|"disputes"| L2
+    L1 -->|"HIT"| HitChat
+    L1 -->|"MISS"| Hedge
+    Hedge -->|"primary"| Primary
+    Hedge -.->|"p95 exceeded"| Replica
+    L2 -->|"HIT"| HitDisp
+    L2 -->|"MISS: forward"| DG
+    RL -.->|"counters"| Redis
+    L2 <-.->|"lookup / persist, TTL 24 h"| Redis
+
+    classDef gate fill:#fff4e5,stroke:#e8a33d,color:#111;
+    classDef cache fill:#e7f1ff,stroke:#3b82f6,color:#111;
+    classDef store fill:#fde8e8,stroke:#dc3545,color:#111;
+    classDef up fill:#e8f7ee,stroke:#28a745,color:#111;
+    classDef result fill:#f3f4f6,stroke:#9ca3af,color:#111;
+    class RL gate;
+    class L1,L2 cache;
+    class Redis store;
+    class Primary,Replica,DG up;
+    class HitChat,HitDisp result;
+
+    style edge fill:#f8fafc,stroke:#94a3b8,color:#111
+    style chat fill:#f1f6ff,stroke:#93c5fd,color:#111
+    style disputes fill:#f1f6ff,stroke:#93c5fd,color:#111
+    style upstream fill:#f2fbf5,stroke:#86efac,color:#111
 ```
 
 ---
