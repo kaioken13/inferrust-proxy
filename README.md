@@ -1,235 +1,249 @@
 # inferrust-proxy ⚡
 
-[![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-orange?logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![Axum](https://img.shields.io/badge/Web-Axum%20%2B%20Tokio-blue)](https://github.com/tokio-rs/axum)
+[![Redis](https://img.shields.io/badge/State-Redis-DC382D?logo=redis&logoColor=white)](https://redis.io/)
+[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker&logoColor=white)](Dockerfile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Docker](https://img.shields.io/badge/Docker-ready-2496ED?logo=docker)](Dockerfile)
 
-A high-performance reverse proxy and edge sidecar gateway for LLM inference and AI microservices, written in Rust (Axum + Tokio).
+A lightweight reverse proxy and LLM inference sidecar written in **Rust** using **Axum** and **Tokio**.
 
-It sits between client applications and downstream services (inference backends like vLLM/Ollama, vector databases, or decision agents like **DisputeGuard**), adding a **two-tier hybrid cache (L1 Moka + L2 Redis)**, distributed rate limiting, transactional idempotency enforcement, and tail-latency mitigation via hedged requests.
+`inferrust-proxy` acts as a front-line gateway for downstream AI workloads. It provides local in-memory L1 caching, Redis-backed L2 distributed idempotency, IP-based rate limiting, dynamic latency-based hedging across model replicas, and raw SSE telemetry for Time to First Token (TTFT) and Inter-Token Latency (ITL).
+
+**Contents:** [Architecture](#architecture-overview) · [Capabilities](#core-capabilities) · [Rate limiting](#rate-limiting--fail-open-behavior) · [Quickstart](#end-to-end-quickstart) · [API usage](#api-verification--usage) · [Metrics](#observability--performance-metrics) · [Limitations](#known-limitations--production-roadmap)
 
 ---
 
-## 🏛️ System Architecture
+## Architecture overview
 
-```mermaid
-flowchart TD
-    Client["Client / Application"] -->|"POST /v1/chat/completions<br/>POST /v1/disputes/resolve"| Proxy["inferrust-proxy :3000"]
-
-    subgraph edge ["Edge Layer: inferrust-proxy :3000"]
-        RL["Distributed Rate Limiter<br/>Atomic Redis Pipeline"]
-        L1["L1 Cache: Local Moka<br/>SHA-256 Prompt Key"]
-        Hedge["Dynamic p95 Hedge Engine<br/>Sliding Latency Window"]
-    end
-
-    subgraph state ["State Layer: Storage and Cache"]
-        Redis[("Redis :6379<br/>Rate Limits + L2 Idempotency 24h TTL")]
-    end
-
-    subgraph downstream ["Downstream Services: Internal Network ml-infra-net"]
-        OllamaA["Inference Engine Replica A :11434"]
-        OllamaB["Inference Engine Replica B :11435"]
-        DisputeGuard["DisputeGuard Agent :8000<br/>FastAPI Decision Service"]
-        VectorDB["VectorDB Core :9100<br/>gRPC Search"]
-    end
-
-    Proxy --> RL
-    RL <--> Redis
-    Proxy --> L1
-    Proxy -.->|"Hedged Request"| Hedge
-    Hedge --> OllamaA
-    Hedge -.->|"Tail Latency Exceeded"| OllamaB
-    Proxy -->|"L2 Idempotency Lookup / Forward"| Redis
-    Proxy -->|"Forward MISS"| DisputeGuard
-    Proxy -->|"gRPC"| VectorDB
+```
++-------------------------------------------------------------------------------+
+|                                INFERRUST-PROXY                                |
+|                                                                               |
+|                   Incoming Request (Port 3000)                                |
+|                                 |                                             |
+|                     [ Redis Rate Limiter ]                                    |
+|                     (Fallback: Fail-Open)                                     |
+|                                 |                                             |
+|            +--------------------+--------------------+                        |
+|            |                                         |                        |
+|   POST /v1/chat/completions                 POST /v1/disputes/resolve         |
+|            |                                         |                        |
+|     [ L1 Cache: Moka ]                      [ L2 Redis Idempotency ]          |
+|      (Prompt/Body Key)                       (Key: Idempotency-Key)           |
+|      /              \                                |                        |
+|   (HIT)            (MISS)                     +------+------+                 |
+|  Return           Forward                     |             |                 |
+|  Cached         to Hedged                   (HIT)         (MISS)              |
+|  Stream          Backends                  Return        Forward              |
+|                     |                      Cached       to Upstream           |
+|            +--------+--------+             Verdict     (DisputeGuard)         |
+|            |                 |                            |                   |
+|       Primary           Speculative                  Persist to Redis         |
+|       Backend          p95 Hedge Node                 (TTL: 24 Hours)         |
+|     (e.g., vLLM/       (e.g., Replica)                                        |
+|       Ollama)                                                                 |
++-------------------------------------------------------------------------------+
 ```
 
 ---
 
-## 💡 Why This Exists
+## Core capabilities
 
-- **Eliminate Redundant Inference:** Identical LLM completions are served sub-millisecond from in-memory cache, freeing GPU clusters from re-computing static prompts.
-- **Transactional Idempotency at the Edge:** Protect downstream transaction services (such as dispute resolutions or refund processing) from duplicated requests during network retries using client-provided `Idempotency-Key` headers stored in Redis.
-- **Curb Tail Latency (p95/p99):** Uses speculative execution (hedged requests) across backend replicas to drop outlier latencies caused by GPU prefill stalls and request queueing.
-- **Resilient Rate Limiting:** Enforces token-aware and IP-based sliding window limits using Redis with zero-allocation fail-open semantics.
+- **L1 cache (in-memory, Moka):** caches identical requests and full Server-Sent Events (SSE) token streams locally. Each proxy instance has its own L1 cache.
+- **L2 distributed idempotency (Redis):** intercepts repeated POST requests that carry the same `Idempotency-Key` header and immediately serves the stored upstream response with the header `x-cache: HIT`.
+- **Dynamic tail-latency hedging:** keeps a rolling window of recent response times (N = 100) to calculate the p95 latency. If the primary upstream replica exceeds that threshold, a parallel speculative request goes to an alternate replica and the first response wins.
+- **Streaming telemetry (SSE):** inspects chunks on `/v1/chat/completions` (when `stream: true`) to record TTFT and ITL histograms in Prometheus format, without full JSON deserialization.
+- **Cache poisoning defense:** only HTTP `2xx` responses are written to the cache. Upstream failures and error status codes are never stored.
 
----
+### Endpoints
 
-## ✨ Core Features
-
-### 1. Two-Tier Hybrid Caching (L1 Moka + L2 Redis)
-
-- **L1 In-Memory Cache (Moka):** Caches raw LLM completions by prompt SHA-256 hash. Returns zero-copy byte payloads directly via `axum::body::Body::from(cached_data)`.
-- **L2 Distributed Idempotency (Redis):** On routes like `/v1/disputes/resolve`, the gateway captures the client's `Idempotency-Key` header. Cache hits return immediate `200 OK` with `x-cache: HIT` (<5ms). On cache misses (`x-cache: MISS`), the request is forwarded to downstream agents (e.g., DisputeGuard) and persisted in Redis with a 24-hour TTL (`SETEX 86400`).
-
-### 2. Hedged Requests with Dynamic p95 Timeout
-
-Implements speculative execution as detailed in *The Tail at Scale* (Dean & Barroso). The proxy maintains a thread-safe sliding window (`VecDeque<u64>`) of recent response times to dynamically calibrate the p95 threshold. If the primary replica does not yield response headers within this window, a concurrent hedged request is dispatched to replica B. First response wins; the trailing request is canceled.
-
-### 3. Asynchronous SSE Stream Caching (Write-Behind)
-
-For streaming requests (`stream: true`), tokens are streamed without latency penalty to the client via `tokio::sync::mpsc`. A detached task (`tokio::spawn`) aggregates chunks in the background and commits the full stream to cache once completed.
-
-### 4. BPE Tokenizer & Rate Limiting
-
-- Embeds Hugging Face's `tokenizers` engine in Rust. Long prompts are processed asynchronously via `tokio::task::spawn_blocking` to avoid blocking the Tokio async worker pool.
-- Rate limiting operates on an atomic Redis transaction pipeline (`INCR` + `EXPIRE`), defaulting to fail-open availability if Redis becomes temporarily unreachable.
+| Method | Path | Upstream | Cache or idempotency |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/v1/chat/completions` | Inference replicas (vLLM, Ollama) | L1 Moka plus hedging |
+| `POST` | `/v1/disputes/resolve` | DisputeGuard (`:8000`, internal) | L2 Redis (`idempotency:<key>`, 24 h TTL) |
+| `GET` | `/metrics` | Self | Prometheus metrics |
 
 ---
 
-## 📡 Exposed Endpoints
+## Rate limiting & fail-open behavior
 
-| Method | Path | Target Backend | Cache / Idempotency Strategy |
-| --- | --- | --- | --- |
-| `POST` | `/v1/chat/completions` | vLLM / Ollama (`:11434`) | L1 Moka (SHA-256 Prompt Hash) + Dynamic Hedging |
-| `POST` | `/v1/disputes/resolve` | DisputeGuard API (`:8000`) | L2 Redis (`idempotency:<UUID>` with 24h TTL) |
-| `POST` | `/v1/vectors/search` | VectorDB Core (`:9100`) | gRPC passthrough + telemetry |
-| `GET` | `/health` | Self | Gateway health check (`200 OK`) |
-| `GET` | `/metrics` | Prometheus Scraper | Internal latency distributions and cache counters |
+The proxy contains two rate-limiting implementations with different roles:
+
+1. **Active HTTP middleware (`RedisRateLimiter`):**
+   - Uses Redis atomic commands (`INCR` + `EXPIRE`) over a fixed 60-second window.
+   - Enforces request quotas per client IP across distributed proxy instances.
+2. **In-memory struct (`AtomicRateLimiter`):**
+   - Built on a sharded `DashMap<String, Arc<AtomicU64>>`, using 64-bit atomic bit-packing (32 bits for the UNIX epoch in seconds, 32 bits for the request count).
+   - Available in the codebase as a building block for single-node deployments. It is not the active middleware.
+3. **Fail-open strategy:**
+   - If Redis is unreachable, **both the HTTP rate limiter and the dispute idempotency layer fail open**.
+   - Requests go through to downstream services instead of being dropped with an HTTP 503.
+   - *Trade-off:* during a Redis outage, downstream services must handle their own throttling and duplicate-request protection.
 
 ---
 
-## ⚡ Quickstart
+## End-to-end quickstart
 
 ### Prerequisites
 
-- Docker & Docker Compose (v2)
-- Rust 1.75+ (only for native compilation)
-- Downloaded `tokenizer.json` in the root folder (e.g., Llama-3 BPE tokenizer from Hugging Face)
+- Docker and Docker Compose (v2+)
+- `curl`
+- A Groq API key (used by the downstream DisputeGuard service)
 
-### Option A: End-to-End Stack with DisputeGuard (Recommended)
+### 1. Project directory structure
 
-Orchestrates the complete edge gateway, Redis, and the Python decision agent (`disputeguard`) on the shared `ml-infra-net` Docker network.
-
-*(Requires both `inferrust-proxy` and `disputeguard` cloned into the same parent directory.)*
+Keep both projects in adjacent directories to run the integrated stack:
 
 ```bash
-# From the inferrust-proxy directory:
-docker compose -f docker-compose.integration.yml up --build -d
+mkdir -p ~/projects
+cd ~/projects
+
+git clone https://github.com/kaioken13/inferrust-proxy.git
+git clone https://github.com/kaioken13/disputeguard.git
 ```
 
-**Test 1: First Call (Cache MISS, processed downstream)**
+### 2. Integration stack (proxy + Redis + DisputeGuard)
+
+The integration stack runs the proxy as an edge gateway in front of the DisputeGuard API.
 
 ```bash
-curl -i -X POST http://localhost:3000/v1/disputes/resolve \
+cd ~/projects/inferrust-proxy
+
+# Groq API key used by DisputeGuard
+export GROQ_API_KEY="gsk_your_actual_key_here"
+
+# Redis on 6379, proxy on 3000, DisputeGuard on the internal network only
+docker compose -f docker-compose.integration.yml up -d --build
+
+# Check that all 3 containers are running
+docker compose -f docker-compose.integration.yml ps
+```
+
+Expected output:
+
+```text
+NAME               IMAGE                             STATUS         PORTS
+disputeguard-api   inferrust-infra-disputeguard-api  Up (healthy)   8000/tcp
+inferrust-proxy    inferrust-infra-inferrust-proxy   Up             0.0.0.0:3000->3000/tcp
+redis              redis:7-alpine                    Up             0.0.0.0:6379->6379/tcp
+```
+
+> Redis is published on the host for local testing. Do not expose it outside a trusted network without authentication.
+
+---
+
+## API verification & usage
+
+### 1. Distributed idempotency (`/v1/disputes/resolve`)
+
+#### Step A: first request (MISS, passes through to the upstream)
+
+```bash
+curl -i -s -X POST http://localhost:3000/v1/disputes/resolve \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: ifood-order-uuid-9921" \
+  -H "Idempotency-Key: ifood-claim-test-01" \
   -d '{
-    "order_id": "ORD-9921",
-    "customer_id": "CUST-4412",
-    "dispute_text": "Delivery was delayed by 65 minutes, package was damaged.",
-    "order_amount": 62.00
+    "order_id": "ORD-101",
+    "customer_id": "CUST-01",
+    "dispute_text": "Delivery arrived 70 minutes late and the food was completely cold."
   }'
 ```
 
-Notice header: `x-cache: MISS` (~850ms latency)
+Response header: `x-cache: MISS`. Response body: the verdict returned by DisputeGuard.
 
-**Test 2: Duplicate Call (Cache HIT, returned from Redis)**
+#### Step B: same key (HIT, immediate return from the edge)
 
 ```bash
-curl -i -X POST http://localhost:3000/v1/disputes/resolve \
+curl -i -s -X POST http://localhost:3000/v1/disputes/resolve \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: ifood-order-uuid-9921" \
+  -H "Idempotency-Key: ifood-claim-test-01" \
   -d '{
-    "order_id": "ORD-9921",
-    "customer_id": "CUST-4412",
-    "dispute_text": "Delivery was delayed by 65 minutes, package was damaged.",
-    "order_amount": 62.00
+    "order_id": "ORD-101",
+    "customer_id": "CUST-01",
+    "dispute_text": "Delivery arrived 70 minutes late and the food was completely cold."
   }'
 ```
 
-Notice header: `x-cache: HIT` (<4ms latency)
+Response header: `x-cache: HIT`. Response latency: under 5 ms, served from Redis without calling the downstream service.
 
-### Option B: Standalone Proxy with Ollama Inference
+> **Key matching.** The proxy maps idempotency strictly to the `Idempotency-Key` header (`idempotency:<KEY>`). If a client sends a *different* body with an already-used key, the proxy returns the original cached response. A hardened version would combine the key with a hash of the request payload (for example `SHA-256(body)`) and reject mismatches with HTTP 422.
 
-To test LLM completions with in-memory caching and hedged requests:
+### 2. Standalone inference and hedging stack (proxy + Ollama replicas)
 
-1. Launch standalone proxy and dependencies:
-
-   ```bash
-   docker compose up -d --build
-   ```
-
-2. Pull the model into the container:
-
-   ```bash
-   docker exec -it inferrust-ollama ollama pull llama3
-   ```
-
-3. Send a completion request:
-
-   ```bash
-   curl -i -X POST http://localhost:3000/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -d '{
-       "model": "llama3",
-       "messages": [{"role": "user", "content": "Explain tail latency in 2 sentences."}],
-       "stream": false
-     }'
-   ```
-
-### Option C: Bare Metal (Native Development)
+To run the proxy against dedicated inference backends:
 
 ```bash
-# 1. Start local Redis
-redis-server --daemonize yes
+cd ~/projects/inferrust-proxy
 
-# 2. Export environment variables
-export REDIS_URL="redis://localhost:6379"
-export BACKEND_URLS="http://localhost:11434"
-export RATE_LIMIT_BURST="100"
-export RUST_LOG="inferrust_proxy=debug,info"
+# BPE tokenizer file used to count prompt tokens locally
+curl -s -L -o tokenizer.json https://huggingface.co/NousResearch/Meta-Llama-3-8B/raw/main/tokenizer.json
 
-# 3. Run gateway
-cargo run --release
+# Start the inference stack
+docker compose -f docker-compose.yml up -d --build
+
+# Pull the model into both replicas
+docker exec -it ollama-a ollama pull llama3:8b
+docker exec -it ollama-b ollama pull llama3:8b
+```
+
+#### Streaming request (SSE) with metrics tracking
+
+```bash
+curl -N -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama3:8b",
+    "messages": [{"role": "user", "content": "Explain CAP theorem in two sentences."}],
+    "stream": true
+  }'
 ```
 
 ---
 
-## 📊 Benchmarks
+## Observability & performance metrics
 
-Evaluated with `oha` (100 requests, concurrency = 10, non-streaming Llama 3 8B):
+### Measured latencies
 
-| Metric | Direct Engine | Behind inferrust-proxy | Speedup |
-| --- | --- | --- | --- |
-| Total Duration | 11 min 01 s | 150.78 ms | ~4,400x faster |
-| Throughput | 0.15 req/s | 663.23 req/s | ~4,380x |
-| Average Latency | 62.92 s | 13.99 ms | ~4,500x lower |
-| Median (p50) | 64.04 s | 8.21 ms | ~7,800x lower |
-| p95 Latency | 74.01 s | 52.40 ms | ~1,410x lower |
+| Path | Conditions | Result |
+| :--- | :--- | :--- |
+| L1 cache HIT (Moka) | 10 concurrent clients (`oha`) | p50 = 8.21 ms, mean = 13.99 ms, min = 3.4 ms |
+| L2 Redis HIT | Single request over the local Docker network | under 5 ms |
+| Upstream dispute round trip | DisputeGuard evaluation cases that did not hit the Groq rate limit (3 cases) | about 627 ms to 1,602 ms |
 
-*Note: Benchmarks reflect cache hit workloads against uncached inference engines.*
+The L1 figures come from one `oha` run on one machine. The upstream figure comes from the DisputeGuard `make eval` run, which calls the model provider directly.
+
+### Prometheus endpoint (`/metrics`)
+
+The proxy exposes a Prometheus scrape target on port `3000`:
+
+```bash
+curl -s http://localhost:3000/metrics | grep -E "(llm_|request_)"
+```
+
+- `llm_time_to_first_token_seconds`: histogram of the time from request receipt until the first SSE data chunk arrives from the upstream provider (network plus prefill).
+- `llm_inter_token_latency_seconds`: histogram of the time between consecutive streaming chunks (decode throughput).
+- `x-prompt-tokens` (response header): prompt token count computed locally with Hugging Face tokenizers before the request goes upstream.
 
 ---
 
-## 🔬 Engineering Trade-offs & Limitations
+## Known limitations & production roadmap
 
-- **Exact SHA-256 vs Semantic Caching:** L1 cache relies on exact token/prompt matching. This maximizes throughput (sub-millisecond byte lookups) while deliberately avoiding the high vector-embedding overhead of semantic caches.
-- **Fail-Open Strategy:** If Redis becomes unavailable, rate limiting relaxes to permit ongoing traffic, prioritizing system availability over strict quota enforcement.
-- **Speculative Load:** Hedging cuts p95 tail latencies at the cost of duplicate compute on the trailing replica when timeouts trigger.
-
----
-
-## 🛠️ Tech Stack
-
-- **Language & Runtime:** Rust (1.75+), Tokio (multi-threaded async scheduler)
-- **Web Framework:** Axum 0.7
-- **Caching & Storage:** Moka (L1), Redis via async multiplexed connection (L2)
-- **Tokenizer:** Hugging Face `tokenizers`
-- **Telemetry:** Prometheus metrics exporter (`/metrics`), Tracing subscriber
-- **Client & Networking:** Reqwest with persistent connection pooling
+1. **Payload-unaware idempotency.** The Redis key comes only from the header value. A client that reuses a key with different content receives the stored response instead of an HTTP 422.
+2. **Fail-open idempotency during outages.** If Redis is down, dispute requests go straight to the upstream without deduplication, so duplicate protection falls to the downstream service.
+3. **Fixed-window rate limiter.** The active Redis limiter uses a 60-second fixed window, not a sliding log or token bucket, so bursts can pass around the window reset.
+4. **Hedging footprint.** Speculative duplicate requests at high p95 increase total backend load. Replica pools need headroom for the duplicates.
+5. **Per-instance L1 cache, exact matching.** Each proxy instance has its own Moka cache, and only identical requests hit it.
+6. **Benchmark scope.** The L1 numbers come from a single `oha` run. They measure cache hits and say nothing about the proxy's overhead on cache misses.
 
 ---
 
 ## 👨‍💻 Author
 
-**Thiago Aragão da Silva**
-Data Science undergraduate at University of São Paulo (ICMC-USP)
-Focus: Systems Engineering, MLOps & High-Performance AI Gateways
-
+**Thiago Aragão da Silva**<br/>
+Data Science undergraduate at University of São Paulo (ICMC-USP)<br/>
+Focus: Systems Engineering, MLOps & High-Performance AI Gateways<br/>
 [GitHub](https://github.com/kaioken13) · [LinkedIn](https://www.linkedin.com/in/thiagoaragao147/)
-
----
 
 ## 📜 License
 
