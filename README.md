@@ -142,7 +142,7 @@ redis              redis:7-alpine                    Up             0.0.0.0:6379
 ```bash
 curl -i -s -X POST http://localhost:3000/v1/disputes/resolve \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: ifood-claim-test-01" \
+  -H "Idempotency-Key: delivery-claim-uuid-8841" \
   -d '{
     "order_id": "ORD-101",
     "customer_id": "CUST-01",
@@ -157,7 +157,7 @@ Response header: `x-cache: MISS`. Response body: the verdict returned by Dispute
 ```bash
 curl -i -s -X POST http://localhost:3000/v1/disputes/resolve \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: ifood-claim-test-01" \
+  -H "Idempotency-Key: delivery-claim-uuid-8841" \
   -d '{
     "order_id": "ORD-101",
     "customer_id": "CUST-01",
