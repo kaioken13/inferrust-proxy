@@ -57,14 +57,14 @@ pub async fn forward_to_disputeguard(
 ) -> Result<Response, StatusCode> {
     let (parts, body) = req.into_parts();
 
-    // 1. Extração da Chave de Idempotência
+    // 1. Idempotency-Key Extraction
     let idempotency_key = parts
         .headers
         .get("idempotency-key")
         .and_then(|val| val.to_str().ok())
         .map(|s| format!("idempotency:{}", s));
 
-    // 2. Consulta no Redis se a chave foi fornecida
+    // 2. Redis Consultation if the key was provided
     if let (Some(ref key), Some(ref client)) = (&idempotency_key, &state.redis_client) {
         if let Ok(mut con) = client.get_multiplexed_async_connection().await {
             let cached: redis::RedisResult<Option<String>> = con.get(key).await;
@@ -83,7 +83,7 @@ pub async fn forward_to_disputeguard(
         }
     }
 
-    // 3. Lê o corpo da requisição para encaminhar ao DisputeGuard
+    // 3. Reads the request body to forward it to DisputeGuard
     let bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
         .await
         .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -95,7 +95,7 @@ pub async fn forward_to_disputeguard(
         upstream_req = upstream_req.header(header::CONTENT_TYPE, content_type);
     }
 
-    // 4. Executa a requisição upstream
+    // 4. Executes the upstream request
     let upstream_res = upstream_req
         .send()
         .await
@@ -107,13 +107,14 @@ pub async fn forward_to_disputeguard(
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    // 5. Se foi sucesso e há chave de idempotência, persiste no Redis (TTL = 86400s / 24h)
+    // 5. If successful and an idempotency key is present, persist it in Redis (TTL = 86400s / 24h)
     if status.is_success() {
         if let (Some(ref key), Some(ref client)) = (&idempotency_key, &state.redis_client) {
             if let Ok(mut con) = client.get_multiplexed_async_connection().await {
-                let body_str = String::from_utf8_lossy(&res_bytes).to_string();
-                let _: redis::RedisResult<()> = con.set_ex(key, body_str, 86400).await;
-                tracing::info!("Idempotency SET for key: {}", key);
+                match con.set_ex::<_, _, ()>(key, res_bytes.as_ref(), 86400).await {
+                    Ok(_) => tracing::info!("Cached response for idempotency key: {}", key),
+                    Err(e) => tracing::error!("Failed to cache response in Redis: {}", e),
+                }
             }
         }
     }
@@ -374,7 +375,7 @@ pub async fn chat_completions_handler(
         let prompt_tokens_clone = prompt_tokens;
         let req_start = start;
 
-        // Background worker: mede TTFT/ITL, repassa chunks para o cliente e salva no cache L1
+        // Background worker: measures TTFT/ITL, forwards chunks to the client, and saves them to the L1 cache
         tokio::spawn(async move {
             let mut cache_buffer = Vec::new();
             let mut is_first_chunk = true;
@@ -386,12 +387,12 @@ pub async fn chat_completions_handler(
                         let now = std::time::Instant::now();
 
                         if is_first_chunk {
-                            // TTFT real: intervalo desde a chegada do request no proxy até o 1º chunk emitido
+                            // Actual TTFT: interval from the arrival of the request at the proxy until the first chunk is emitted
                             let ttft = req_start.elapsed().as_secs_f64();
                             histogram!("llm_time_to_first_token_seconds").record(ttft);
                             is_first_chunk = false;
                         } else {
-                            // ITL real: latência decorrida entre chunks sucessivos de decode
+                            // ITL real: latency elapsed between successive decode chunks
                             let itl = now.duration_since(last_chunk_time).as_secs_f64();
                             histogram!("llm_inter_token_latency_seconds").record(itl);
                         }
@@ -410,7 +411,7 @@ pub async fn chat_completions_handler(
                 }
             }
 
-            // Persistência no cache L1 Moka (apenas para status 2xx)
+            // Persistence in Moka L1 cache (for 2xx status codes only)
             if !cache_buffer.is_empty() && status.is_success() {
                 if let Ok(full_sse_text) = String::from_utf8(cache_buffer) {
                     let cache_entry = CacheEntry {
@@ -428,7 +429,7 @@ pub async fn chat_completions_handler(
         Ok((status, res_headers, body).into_response())
     } else {
         // --- NON-STREAMING MODE ---
-        let response_text = response.text().await.map_err(|e| {
+        let response_bytes = response.bytes().await.map_err(|e| {
             tracing::error!("Failed to extract response text: {}", e);
             (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -438,13 +439,16 @@ pub async fn chat_completions_handler(
 
         // Cache Poisoning Shield (Only cache 200 OK)
         if status.is_success() {
-            let cache_entry = CacheEntry {
-                response_json: response_text.clone(),
-                prompt_tokens,
-            };
+            if let Ok(response_str) = std::str::from_utf8(&response_bytes.as_ref()) {
+                tracing::info!("Caching response for key: {}", cache_key);
+                let cache_entry = CacheEntry {
+                    response_json: response_str.to_string(),
+                    prompt_tokens,
+                };
 
-            if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
-                state.cache.insert(cache_key, entry_json).await;
+                if let Ok(entry_json) = serde_json::to_string(&cache_entry) {
+                    state.cache.insert(cache_key, entry_json).await;
+                }
             }
         } else {
             tracing::warn!("Skipping cache insertion due to non-200 status: {}", status);
@@ -457,6 +461,6 @@ pub async fn chat_completions_handler(
             axum::http::HeaderValue::from_static("application/json"),
         );
 
-        Ok((status, res_headers, response_text).into_response())
+        Ok((status, res_headers, response_bytes).into_response())
     }
 }
