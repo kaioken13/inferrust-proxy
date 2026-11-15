@@ -26,12 +26,19 @@ impl RateLimiter for RedisRateLimiter {
             .await
             .map_err(|e| RateLimitError::Backend(e.to_string()))?;
 
-        let redis_key = format!("rate_limit:{}", key);
+        let now_sec = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let current_epoch = (now_sec / window_secs) as u32;
+        // The key changes every 60s window: e.g., "rate_limit:127.0.0.1:28392100"
+        let redis_key = format!("rate_limit:{}:{}", key, current_epoch);
 
         let result: Result<(i64, ()), redis::RedisError> = redis::pipe()
             .atomic()
             .incr(&redis_key, 1)
-            .expire(&redis_key, window_secs as i64)
+            .expire(&redis_key, (window_secs * 2) as i64) // Safety TTL for self-cleaning
             .query_async(&mut conn)
             .await;
 

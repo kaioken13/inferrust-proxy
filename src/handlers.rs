@@ -439,7 +439,7 @@ pub async fn chat_completions_handler(
 
         // Cache Poisoning Shield (Only cache 200 OK)
         if status.is_success() {
-            if let Ok(response_str) = std::str::from_utf8(&response_bytes.as_ref()) {
+            if let Ok(response_str) = std::str::from_utf8(response_bytes.as_ref()) {
                 tracing::info!("Caching response for key: {}", cache_key);
                 let cache_entry = CacheEntry {
                     response_json: response_str.to_string(),

@@ -48,12 +48,15 @@ impl RateLimiter for AtomicRateLimiter {
 
         let current_epoch = (now_sec / window_secs) as u32;
 
-        let entry = self
-            .windows
-            .entry(key.to_string())
-            .or_insert_with(|| Arc::new(AtomicU64::new(Self::pack(current_epoch, 0))));
-
-        let state_atomic = entry.value().clone();
+        let state_atomic = if let Some(existing) = self.windows.get(key) {
+            existing.value().clone()
+        } else {
+            self.windows
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(AtomicU64::new(Self::pack(current_epoch, 0))))
+                .value()
+                .clone()
+        };
 
         loop {
             let current = state_atomic.load(Ordering::Acquire);
@@ -62,7 +65,7 @@ impl RateLimiter for AtomicRateLimiter {
             let (next_epoch, next_count) = if epoch == current_epoch {
                 (epoch, count.saturating_add(1))
             } else {
-                // Nova janela de tempo iniciada: reseta contador
+                // New time window started: reset counter
                 (current_epoch, 1)
             };
 
@@ -76,7 +79,7 @@ impl RateLimiter for AtomicRateLimiter {
             ) {
                 Ok(_) => return Ok((next_count as usize) <= limit),
                 Err(_) => {
-                    // Contenção detectada (outra thread alterou o u64), repete o loop imediatamente
+                    // Contention detected (another thread modified the u64), repeat the loop immediately
                     std::hint::spin_loop();
                 }
             }

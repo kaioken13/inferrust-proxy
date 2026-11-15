@@ -49,7 +49,7 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(60);
 
-    // Constrói o limiter via trait a partir do RedisClient registrado no AppState
+    // Builds the limiter via a trait, using the RedisClient registered in the AppState
     let limiter: Option<Arc<dyn RateLimiter>> = state
         .redis_client
         .as_ref()
