@@ -57,7 +57,7 @@ services:
     container_name: grafana
     restart: always
     ports:
-      - "3001:3000" # Mapeado para 3001 no host para não conflitar com a porta 3000 do proxy
+      - "3001:3000" # Mapped to 3001 on the host to avoid conflict with the proxy's port 3000
     volumes:
       - grafana_data:/var/lib/grafana
     environment:

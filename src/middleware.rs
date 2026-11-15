@@ -63,7 +63,7 @@ where
         let limit = self.limit;
         let window_secs = self.window_secs;
 
-        // Extrai o IP do cliente respeitando proxies upstream se configurado
+        // Extracts the client's IP, respecting upstream proxies if configured
         let client_ip = if self.behind_proxy {
             req.headers()
                 .get("x-forwarded-for")
