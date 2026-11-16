@@ -29,7 +29,7 @@ COPY benches ./benches
 COPY tokenizer.json ./
 
 # Compile the actual project in release mode
-RUN touch src/main.rs && cargo build --release
+RUN touch src/lib.rs src/main.rs && cargo build --release
 
 # --- Stage 2: Runtime Stage ---
 FROM debian:bookworm-slim

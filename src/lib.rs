@@ -1,6 +1,7 @@
 // src/lib.rs
 pub mod cache;
 pub mod handlers;
+pub mod metrics;
 pub mod middleware;
 pub mod rate_limiter;
 pub mod utils;

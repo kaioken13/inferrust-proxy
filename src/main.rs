@@ -17,6 +17,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let _ = inferrust_proxy::metrics::llm_time_to_first_token_seconds();
+    let _ = inferrust_proxy::metrics::llm_inter_token_latency_seconds();
+    let _ = inferrust_proxy::metrics::request_total();
+
     let cache = Cache::builder()
         .max_capacity(10_000)
         .time_to_live(Duration::from_secs(60 * 60))
@@ -73,15 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = create_app(state).route(
         "/metrics",
-        get(|| async {
-            use prometheus::Encoder;
-            let encoder = prometheus::TextEncoder::new();
-            let metric_families = prometheus::gather();
-            let mut buffer = vec![];
-            let _ = encoder.encode(&metric_families, &mut buffer);
-            String::from_utf8(buffer).unwrap_or_default()
-        }),
+        get(|| async { inferrust_proxy::metrics::gather_metrics() }),
     );
+
     let host = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
     let addr: SocketAddr = format!("{}:{}", host, port)

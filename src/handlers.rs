@@ -1,8 +1,10 @@
 // src/handlers.rs
+use crate::metrics::{
+    llm_inter_token_latency_seconds, llm_time_to_first_token_seconds, request_total,
+};
 use axum::http::header;
 use axum::{extract::Request, response::Response};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use metrics::histogram;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -342,6 +344,23 @@ pub async fn chat_completions_handler(
 
     // 8. Record TTFT metrics synchronously
     let duration = start.elapsed().as_millis() as u64;
+
+    let model_name = payload
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let stream_label = if is_stream { "true" } else { "false" };
+
+    if !is_stream {
+        llm_time_to_first_token_seconds()
+            .with_label_values(&[&model_name, stream_label])
+            .observe(duration as f64 / 1000.0);
+    }
+
+    request_total()
+        .with_label_values(&[&model_name, status.as_str(), stream_label])
+        .inc();
     {
         let mut latencies = state.latencies.write().unwrap();
         if latencies.len() >= 100 {
@@ -375,6 +394,8 @@ pub async fn chat_completions_handler(
         let prompt_tokens_clone = prompt_tokens;
         let req_start = start;
 
+        let model_name_clone = model_name.clone();
+
         // Background worker: measures TTFT/ITL, forwards chunks to the client, and saves them to the L1 cache
         tokio::spawn(async move {
             let mut cache_buffer = Vec::new();
@@ -389,12 +410,16 @@ pub async fn chat_completions_handler(
                         if is_first_chunk {
                             // Actual TTFT: interval from the arrival of the request at the proxy until the first chunk is emitted
                             let ttft = req_start.elapsed().as_secs_f64();
-                            histogram!("llm_time_to_first_token_seconds").record(ttft);
+                            llm_time_to_first_token_seconds()
+                                .with_label_values(&[&model_name_clone, "true"])
+                                .observe(ttft);
                             is_first_chunk = false;
                         } else {
                             // ITL real: latency elapsed between successive decode chunks
                             let itl = now.duration_since(last_chunk_time).as_secs_f64();
-                            histogram!("llm_inter_token_latency_seconds").record(itl);
+                            llm_inter_token_latency_seconds()
+                                .with_label_values(&[&model_name_clone])
+                                .observe(itl);
                         }
                         last_chunk_time = now;
 
